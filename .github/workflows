@@ -1,1 +1,122 @@
+name: Test Kernel Source Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-build:
+    runs-on: ubuntu-22.04
+
+    env:
+      TZ: Asia/Jakarta
+      KERNEL_SOURCE_URL: https://github.com/USERNAME/REPO.git
+      KERNEL_SOURCE_BRANCH: main
+      DEFCONFIG: gki_defconfig
+      OUT_DIR: out
+      NEUTRON_CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/240000/clang-neutron-24.x.tar.zst
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git wget curl bc bison flex cpio zip unzip rsync \
+            build-essential libssl-dev libelf-dev pahole dwarves \
+            python3 python-is-python3 zstd clang lld llvm file
+
+      - name: Show config
+        run: |
+          echo "URL=${KERNEL_SOURCE_URL}"
+          echo "BRANCH=${KERNEL_SOURCE_BRANCH}"
+          echo "DEFCONFIG=${DEFCONFIG}"
+
+      - name: Build auth URL
+        run: |
+          if [ -n "${{ secrets.GH_TOKEN }}" ]; then
+            AUTH_URL="$(echo "${KERNEL_SOURCE_URL}" | sed 's#https://#https://${{ secrets.GH_TOKEN }}@#')"
+          else
+            AUTH_URL="${KERNEL_SOURCE_URL}"
+          fi
+          echo "AUTH_URL=${AUTH_URL}" >> $GITHUB_ENV
+
+      - name: Check branch exists
+        run: |
+          git ls-remote --heads "${AUTH_URL}" "${KERNEL_SOURCE_BRANCH}" | tee branch.txt
+          test -s branch.txt
+
+      - name: Clone source
+        run: |
+          git clone --depth=1 -b "${KERNEL_SOURCE_BRANCH}" "${AUTH_URL}" kernel
+          cd kernel
+          git remote set-url origin "${KERNEL_SOURCE_URL}" || true
+          git log --oneline -1
+
+      - name: Download Neutron Clang
+        run: |
+          mkdir -p toolchain
+          cd toolchain
+          wget -O clang.tar.zst "${NEUTRON_CLANG_URL}"
+          tar --use-compress-program=unzstd -xf clang.tar.zst
+          find . -type f -name clang | head
+
+      - name: Export toolchain
+        run: |
+          CLANG_BIN="$(find "$GITHUB_WORKSPACE/toolchain" -type f -name clang | head -n1 | xargs dirname)"
+          echo "$CLANG_BIN" >> $GITHUB_PATH
+          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
+
+      - name: Check defconfig exists
+        run: |
+          cd kernel
+          ls arch/arm64/configs | grep "${DEFCONFIG}" || true
+          test -f "arch/arm64/configs/${DEFCONFIG}"
+
+      - name: Configure
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          make O=${OUT_DIR} ${DEFCONFIG}
+
+      - name: Build
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          make -j$(nproc --all) O=${OUT_DIR}
+
+      - name: Collect result
+        run: |
+          mkdir -p artifacts
+          find kernel/${OUT_DIR} -type f \( -name "Image" -o -name "Image.gz" -o -name "Image.lz4" -o -name "*.ko" \) \
+            -exec cp -v {} artifacts/ \; || true
+          cp -v kernel/${OUT_DIR}/.config artifacts/kernel_config.txt || true
+          ls -lah artifacts || true
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-kernel-build
+          path: artifacts/*
 
