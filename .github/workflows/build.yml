@@ -8,21 +8,27 @@ on:
         required: true
         default: "true"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "true"
+          - "false"
 
       enable_rekernel:
         description: "Enable Re:Kernel feature packaging"
         required: true
         default: "false"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "true"
+          - "false"
 
       enable_susfs:
         description: "Enable SUSFS feature packaging"
         required: true
         default: "false"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "true"
+          - "false"
 
       susfs_repo:
         description: "SUSFS repo owner/name for latest release lookup"
@@ -36,7 +42,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -77,12 +83,20 @@ jobs:
           sudo apt install -y \
             git curl wget unzip zip rsync bc bison flex cpio jq \
             build-essential libssl-dev libelf-dev pahole \
-            python3 python-is-python3 xz-utils zstd lz4 \
+            python3 python-is-python3 xz-utils zstd lz4 file \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-      - name: Download Neutron Clang
+      - name: Show host libc
         run: |
+          ldd --version || true
+          getconf GNU_LIBC_VERSION || true
+          ls -l /lib/x86_64-linux-gnu/libc.so.6 || true
+
+      - name: Download Neutron Clang
+        shell: bash
+        run: |
+          set -e
           mkdir -p "${GITHUB_WORKSPACE}/toolchains"
           cd "${GITHUB_WORKSPACE}/toolchains"
 
@@ -91,26 +105,47 @@ jobs:
           mkdir -p neutron
           tar --use-compress-program=unzstd -xf neutron-clang.tar.zst -C neutron
 
-          CLANG_BIN="$(find "${GITHUB_WORKSPACE}/toolchains/neutron" -type d -path '*/bin' | head -n 1)"
+          CLANG_BIN="$(find "${GITHUB_WORKSPACE}/toolchains/neutron" -type f -name clang | head -n 1)"
           if [ -z "${CLANG_BIN}" ]; then
-            echo "Neutron clang bin path not found!"
-            find "${GITHUB_WORKSPACE}/toolchains/neutron" -maxdepth 4 -type d
+            echo "Neutron clang binary not found!"
+            find "${GITHUB_WORKSPACE}/toolchains/neutron" -maxdepth 4
             exit 1
           fi
 
-          echo "CLANG_PATH=${CLANG_BIN}" >> "${GITHUB_ENV}"
+          CLANG_DIR="$(dirname "${CLANG_BIN}")"
+
+          echo "CLANG_BIN=${CLANG_BIN}" >> "${GITHUB_ENV}"
+          echo "CLANG_PATH=${CLANG_DIR}" >> "${GITHUB_ENV}"
 
       - name: Export toolchain paths
         run: |
           echo "${CLANG_PATH}" >> "${GITHUB_PATH}"
           echo "PATH=${CLANG_PATH}:$PATH" >> "${GITHUB_ENV}"
 
-      - name: Show tool versions
+      - name: Inspect Neutron binary
+        shell: bash
         run: |
+          set +e
+          echo "CLANG_BIN=${CLANG_BIN}"
+          file "${CLANG_BIN}" || true
+          ldd "${CLANG_BIN}" || true
+          strings /lib/x86_64-linux-gnu/libc.so.6 | grep GLIBC_2.38 || true
+          strings /lib/x86_64-linux-gnu/libc.so.6 | grep GLIBC_ABI_DT_RELR || true
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          set +e
           which clang
           clang --version
-          ld.lld --version || true
-          aarch64-linux-gnu-gcc --version || true
+          ld.lld --version
+          aarch64-linux-gnu-gcc --version
+          true
+
+      - name: Validate Neutron works
+        shell: bash
+        run: |
+          "${CLANG_BIN}" --version
 
       - name: Prepare output directory
         run: mkdir -p "${OUT_DIR}"
@@ -160,214 +195,4 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "Found image: $IMAGE"
 
-      - name: Prepare kernel artifacts
-        run: |
-          mkdir -p artifacts
-          cp "${{ steps.detect.outputs.image }}" artifacts/
-          cp "${OUT_DIR}/.config" artifacts/kernel.config || true
-          cp "${OUT_DIR}/Module.symvers" artifacts/ 2>/dev/null || true
-          cp "${OUT_DIR}/System.map" artifacts/ 2>/dev/null || true
-
-      - name: Upload kernel artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: yannnz34u-kernel-${{ env.DEVICE_CODENAME }}
-          path: artifacts/*
-
-      - name: Fetch Re:Kernel content
-        if: ${{ github.event.inputs.enable_rekernel == 'true' }}
-        shell: bash
-        run: |
-          git clone --depth=1 "${REKERNEL_REPO}" /tmp/Re-Kernel
-          echo "REKERNEL_DIR=/tmp/Re-Kernel" >> "$GITHUB_ENV"
-
-          mkdir -p /tmp/feature_pack/rekernel
-          cp -a /tmp/Re-Kernel/. /tmp/feature_pack/rekernel/ || true
-
-          echo "Re:Kernel fetched."
-          find /tmp/feature_pack/rekernel -maxdepth 2 -type f | head -n 50 || true
-
-      - name: Fetch latest SUSFS release
-        if: ${{ github.event.inputs.enable_susfs == 'true' }}
-        shell: bash
-        env:
-          SUSFS_REPO: ${{ github.event.inputs.susfs_repo }}
-          SUSFS_ASSET_PATTERN: ${{ github.event.inputs.susfs_asset_pattern }}
-        run: |
-          set -e
-
-          API="https://api.github.com/repos/${SUSFS_REPO}/releases/latest"
-          echo "Querying latest SUSFS release from: ${SUSFS_REPO}"
-
-          JSON="$(curl -fsSL "${API}")"
-          TAG="$(echo "${JSON}" | jq -r '.tag_name')"
-
-          if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
-            echo "Failed to detect latest SUSFS tag"
-            exit 1
-          fi
-
-          echo "Latest SUSFS tag: ${TAG}"
-          echo "SUSFS_TAG=${TAG}" >> "$GITHUB_ENV"
-
-          ASSET_URL="$(echo "${JSON}" | jq -r --arg pat "${SUSFS_ASSET_PATTERN}" '
-            .assets[]
-            | select(.name | test($pat))
-            | .browser_download_url
-          ' | head -n 1)"
-
-          mkdir -p /tmp/feature_pack/susfs
-
-          if [ -n "${ASSET_URL}" ] && [ "${ASSET_URL}" != "null" ]; then
-            echo "Downloading SUSFS asset: ${ASSET_URL}"
-            FNAME="/tmp/feature_pack/susfs/$(basename "${ASSET_URL}")"
-            wget -O "${FNAME}" "${ASSET_URL}"
-
-            case "${FNAME}" in
-              *.zip) unzip -o "${FNAME}" -d /tmp/feature_pack/susfs/unpacked >/dev/null || true ;;
-              *.tar.gz) mkdir -p /tmp/feature_pack/susfs/unpacked && tar -xzf "${FNAME}" -C /tmp/feature_pack/susfs/unpacked || true ;;
-            esac
-          else
-            echo "No matching SUSFS asset found; cloning repo as fallback"
-            git clone --depth=1 "https://github.com/${SUSFS_REPO}.git" /tmp/feature_pack/susfs/repo
-          fi
-
-          echo "SUSFS_DIR=/tmp/feature_pack/susfs" >> "$GITHUB_ENV"
-          find /tmp/feature_pack/susfs -maxdepth 3 -type f | head -n 50 || true
-
-      - name: Build custom AnyKernel3 zip
-        if: ${{ github.event.inputs.build_anykernel == 'true' }}
-        shell: bash
-        run: |
-          set -e
-
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          cp "${{ steps.detect.outputs.image }}" AnyKernel3/Image
-
-          mkdir -p AnyKernel3/feature
-          mkdir -p AnyKernel3/modules/system/lib/modules
-          mkdir -p AnyKernel3/tools/custom
-
-          # Re:Kernel feature packaging
-          if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ] && [ -d /tmp/feature_pack/rekernel ]; then
-            mkdir -p AnyKernel3/feature/rekernel
-            cp -a /tmp/feature_pack/rekernel/. AnyKernel3/feature/rekernel/ || true
-
-            find /tmp/feature_pack/rekernel -type f \( -name "*.ko" -o -name "*.img" -o -name "*.zip" \) | while read -r f; do
-              cp -f "$f" AnyKernel3/tools/custom/ 2>/dev/null || true
-            done
-          fi
-
-          # SUSFS feature packaging
-          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d /tmp/feature_pack/susfs ]; then
-            mkdir -p AnyKernel3/feature/susfs
-            cp -a /tmp/feature_pack/susfs/. AnyKernel3/feature/susfs/ || true
-
-            find /tmp/feature_pack/susfs -type f \( -name "*.ko" -o -name "*.img" -o -name "*.zip" \) | while read -r f; do
-              cp -f "$f" AnyKernel3/tools/custom/ 2>/dev/null || true
-            done
-          fi
-
-          cat > AnyKernel3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-
-          ### AnyKernel setup
-          properties() { '
-          kernel.string=Yannnz34u Android14-6.1.177 for Poco X7 / Redmi Note 14 Pro 5G
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          do.check_boot_version=0
-          device.name1=malachite
-          device.name2=malachite_global
-          device.name3=
-          device.name4=
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; } # end properties
-
-          ### AnyKernel install
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          no_magisk_check=1
-
-          . tools/ak3-core.sh
-
-          # basic GKI check
-          kernel_version=$(cat /proc/version | awk -F '-' '{print $1}' | awk '{print $3}')
-          case $kernel_version in
-              5.10*) gki_supported=true ;;
-              5.15*) gki_supported=true ;;
-              6.1*) gki_supported=true ;;
-              6.6*) gki_supported=true ;;
-              *) gki_supported=false ;;
-          esac
-
-          ui_print " "
-          ui_print "=================================="
-          ui_print "        Yannnzkernel Installer    "
-          ui_print "=================================="
-          ui_print " "
-          ui_print "  -> Kernel   : Yannnz34u"
-          ui_print "  -> Device   : malachite / malachite_global"
-          ui_print "  -> Android  : 14"
-          ui_print "  -> Kernel   : 6.1.177"
-          ui_print " "
-
-          $gki_supported || abort "  -> Non-GKI device, abort."
-
-          # boot install
-          split_boot
-
-          if [ -f "$SPLITIMG/ramdisk.cpio" ]; then
-              unpack_ramdisk
-              write_boot
-          else
-              flash_boot
-          fi
-
-          ui_print " "
-          ui_print "  -> Yannnzkernel flashed successfully"
-          ui_print " "
-          EOF
-
-          # Optional helper note files
-          if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ]; then
-            cat > AnyKernel3/feature/rekernel/README-Yannnzkernel.txt <<'EOF'
-          Re:Kernel feature packaged by workflow.
-          Integration mode: package/inject-ready.
-          If your target implementation requires source patching,
-          add patch steps before kernel build.
-          EOF
-          fi
-
-          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
-            cat > AnyKernel3/feature/susfs/README-Yannnzkernel.txt <<EOF
-          SUSFS feature packaged by workflow.
-          Latest source/release fetched dynamically.
-          If this target needs direct kernel-source SUSFS patching,
-          add patch application before build stage.
-          EOF
-          fi
-
-          ZIP_NAME="Yannnz34u-${DEVICE_CODENAME}-a14-6.1.177-$(date +%Y%m%d-%H%M).zip"
-
-          cd AnyKernel3
-          zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
-          cd ..
-
-          echo "ZIP_NAME=${ZIP_NAME}" >> "${GITHUB_ENV}"
-
-      - name: Upload AnyKernel3 zip
-        if: ${{ github.event.inputs.build_anykernel == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: anykernel3-yannnz34u-${{ env.DEVICE_CODENAME }}
-          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+      -
