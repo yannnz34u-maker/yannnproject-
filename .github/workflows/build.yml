@@ -1,0 +1,157 @@
+name: Build Android14-6.1.177 GKI Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_anykernel:
+        description: "Build AnyKernel3 zip"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      DEFCONFIG: gki_defconfig
+      OUT_DIR: ${{ github.workspace }}/out
+      KBUILD_BUILD_USER: github-actions
+      KBUILD_BUILD_HOST: github
+      TZ: Asia/Jakarta
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set timezone
+        run: sudo timedatectl set-timezone "${TZ}"
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git curl wget unzip zip rsync bc bison flex cpio \
+            build-essential libssl-dev libelf-dev pahole \
+            python3 python-is-python3 xz-utils zstd lz4 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Download Android prebuilt clang
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/toolchains"
+          cd "${GITHUB_WORKSPACE}/toolchains"
+
+          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz"
+          wget -O clang.tar.gz "${CLANG_URL}"
+          mkdir -p clang
+          tar -xzf clang.tar.gz -C clang
+
+          echo "CLANG_PATH=${GITHUB_WORKSPACE}/toolchains/clang/bin" >> $GITHUB_ENV
+
+      - name: Export toolchain paths
+        run: |
+          echo "${CLANG_PATH}" >> $GITHUB_PATH
+          echo "PATH=${CLANG_PATH}:$PATH" >> $GITHUB_ENV
+
+      - name: Show tool versions
+        run: |
+          which clang
+          clang --version
+          ld.lld --version
+          aarch64-linux-gnu-gcc --version || true
+
+      - name: Prepare output directory
+        run: mkdir -p "${OUT_DIR}"
+
+      - name: Generate gki_defconfig
+        run: |
+          make O="${OUT_DIR}" ARCH=arm64 LLVM=1 LLVM_IAS=1 ${DEFCONFIG}
+
+      - name: Olddefconfig
+        run: |
+          make O="${OUT_DIR}" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+      - name: Build kernel
+        run: |
+          make -j"$(nproc --all)" \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+      - name: Detect kernel image
+        id: detect
+        run: |
+          IMAGE=""
+          for f in \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
+            "${OUT_DIR}/arch/arm64/boot/Image.lz4" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb"
+          do
+            if [ -f "$f" ]; then
+              IMAGE="$f"
+              break
+            fi
+          done
+
+          if [ -z "$IMAGE" ]; then
+            echo "Kernel image not found!"
+            find "${OUT_DIR}/arch/arm64/boot" -type f || true
+            exit 1
+          fi
+
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "Found image: $IMAGE"
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp "${{ steps.detect.outputs.image }}" artifacts/
+          cp "${OUT_DIR}/.config" artifacts/kernel.config || true
+          cp "${OUT_DIR}/Module.symvers" artifacts/ 2>/dev/null || true
+          cp "${OUT_DIR}/System.map" artifacts/ 2>/dev/null || true
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android14-6.1.177-gki-kernel
+          path: artifacts/*
+
+      - name: Build AnyKernel3 zip
+        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp "${{ steps.detect.outputs.image }}" AnyKernel3/
+
+          cd AnyKernel3
+
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh || true
+          sed -i 's/do.modules=1/do.modules=0/g' anykernel.sh || true
+          sed -i 's/do.systemless=1/do.systemless=0/g' anykernel.sh || true
+
+          ZIP_NAME="AnyKernel3-GKI-android14-6.1.177-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
+
+          cd ..
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Upload AnyKernel3 zip
+        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: anykernel3-android14-6.1.177-gki
+          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
