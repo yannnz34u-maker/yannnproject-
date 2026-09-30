@@ -43,10 +43,15 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+
     permissions:
       contents: write
 
     env:
+      DEBIAN_FRONTEND: noninteractive
+
       ARCH: arm64
       SUBARCH: arm64
       DEFCONFIG: gki_defconfig
@@ -69,26 +74,38 @@ jobs:
       REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
 
     steps:
+      - name: Install base packages for container
+        run: |
+          apt update
+          apt install -y git ca-certificates curl wget sudo jq
+
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Set timezone
-        run: sudo timedatectl set-timezone "${TZ}"
+        run: |
+          apt update
+          apt install -y tzdata
+          ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
+          dpkg-reconfigure -f noninteractive tzdata
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
+          apt update
+          apt install -y \
             git curl wget unzip zip rsync bc bison flex cpio jq \
             build-essential libssl-dev libelf-dev pahole \
             python3 python-is-python3 xz-utils zstd lz4 file \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
+            libc6 libc6-dev
 
-      - name: Show host libc
+      - name: Show host/container info
         run: |
+          uname -a
+          cat /etc/os-release
           ldd --version || true
           getconf GNU_LIBC_VERSION || true
           ls -l /lib/x86_64-linux-gnu/libc.so.6 || true
@@ -108,7 +125,7 @@ jobs:
           CLANG_BIN="$(find "${GITHUB_WORKSPACE}/toolchains/neutron" -type f -name clang | head -n 1)"
           if [ -z "${CLANG_BIN}" ]; then
             echo "Neutron clang binary not found!"
-            find "${GITHUB_WORKSPACE}/toolchains/neutron" -maxdepth 4
+            find "${GITHUB_WORKSPACE}/toolchains/neutron" -maxdepth 5
             exit 1
           fi
 
@@ -132,20 +149,18 @@ jobs:
           strings /lib/x86_64-linux-gnu/libc.so.6 | grep GLIBC_2.38 || true
           strings /lib/x86_64-linux-gnu/libc.so.6 | grep GLIBC_ABI_DT_RELR || true
 
-      - name: Show tool versions
-        shell: bash
-        run: |
-          set +e
-          which clang
-          clang --version
-          ld.lld --version
-          aarch64-linux-gnu-gcc --version
-          true
-
       - name: Validate Neutron works
         shell: bash
         run: |
           "${CLANG_BIN}" --version
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          which clang
+          clang --version
+          ld.lld --version || true
+          aarch64-linux-gnu-gcc --version || true
 
       - name: Prepare output directory
         run: mkdir -p "${OUT_DIR}"
@@ -160,7 +175,7 @@ jobs:
 
       - name: Build kernel
         run: |
-          make -j"$(nproc --all)" \
+          make -j"$(nproc)" \
             O="${OUT_DIR}" \
             ARCH=arm64 \
             LLVM=1 \
@@ -195,4 +210,169 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "Found image: $IMAGE"
 
-      -
+      - name: Prepare kernel artifacts
+        run: |
+          mkdir -p artifacts
+          cp "${{ steps.detect.outputs.image }}" artifacts/
+          cp "${OUT_DIR}/.config" artifacts/kernel.config || true
+          cp "${OUT_DIR}/Module.symvers" artifacts/ 2>/dev/null || true
+          cp "${OUT_DIR}/System.map" artifacts/ 2>/dev/null || true
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: yannnz34u-kernel-${{ env.DEVICE_CODENAME }}
+          path: artifacts/*
+
+      - name: Fetch Re:Kernel content
+        if: ${{ github.event.inputs.enable_rekernel == 'true' }}
+        shell: bash
+        run: |
+          git clone --depth=1 "${REKERNEL_REPO}" /tmp/Re-Kernel
+          mkdir -p /tmp/feature_pack/rekernel
+          cp -a /tmp/Re-Kernel/. /tmp/feature_pack/rekernel/ || true
+
+      - name: Fetch latest SUSFS release
+        if: ${{ github.event.inputs.enable_susfs == 'true' }}
+        shell: bash
+        env:
+          SUSFS_REPO: ${{ github.event.inputs.susfs_repo }}
+          SUSFS_ASSET_PATTERN: ${{ github.event.inputs.susfs_asset_pattern }}
+        run: |
+          set -e
+          API="https://api.github.com/repos/${SUSFS_REPO}/releases/latest"
+          JSON="$(curl -fsSL "${API}")"
+          TAG="$(echo "${JSON}" | jq -r '.tag_name')"
+
+          if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
+            echo "Failed to detect latest SUSFS tag"
+            exit 1
+          fi
+
+          echo "Latest SUSFS tag: ${TAG}"
+
+          ASSET_URL="$(echo "${JSON}" | jq -r --arg pat "${SUSFS_ASSET_PATTERN}" '
+            .assets[] | select(.name | test($pat)) | .browser_download_url
+          ' | head -n 1)"
+
+          mkdir -p /tmp/feature_pack/susfs
+
+          if [ -n "${ASSET_URL}" ] && [ "${ASSET_URL}" != "null" ]; then
+            FNAME="/tmp/feature_pack/susfs/$(basename "${ASSET_URL}")"
+            wget -O "${FNAME}" "${ASSET_URL}"
+
+            case "${FNAME}" in
+              *.zip)
+                unzip -o "${FNAME}" -d /tmp/feature_pack/susfs/unpacked >/dev/null || true
+                ;;
+              *.tar.gz)
+                mkdir -p /tmp/feature_pack/susfs/unpacked
+                tar -xzf "${FNAME}" -C /tmp/feature_pack/susfs/unpacked || true
+                ;;
+            esac
+          else
+            git clone --depth=1 "https://github.com/${SUSFS_REPO}.git" /tmp/feature_pack/susfs/repo
+          fi
+
+      - name: Build custom AnyKernel3 zip
+        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+        shell: bash
+        run: |
+          set -e
+
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp "${{ steps.detect.outputs.image }}" AnyKernel3/Image
+
+          mkdir -p AnyKernel3/feature
+          mkdir -p AnyKernel3/tools/custom
+
+          if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ] && [ -d /tmp/feature_pack/rekernel ]; then
+            mkdir -p AnyKernel3/feature/rekernel
+            cp -a /tmp/feature_pack/rekernel/. AnyKernel3/feature/rekernel/ || true
+          fi
+
+          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d /tmp/feature_pack/susfs ]; then
+            mkdir -p AnyKernel3/feature/susfs
+            cp -a /tmp/feature_pack/susfs/. AnyKernel3/feature/susfs/ || true
+          fi
+
+          cat > AnyKernel3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          properties() { '
+          kernel.string=Yannnz34u Android14-6.1.177 for Poco X7 / Redmi Note 14 Pro 5G
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          do.check_boot_version=0
+          device.name1=malachite
+          device.name2=malachite_global
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          block=boot
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          no_magisk_check=1
+
+          . tools/ak3-core.sh
+
+          kernel_version=$(cat /proc/version | awk -F '-' '{print $1}' | awk '{print $3}')
+          case $kernel_version in
+              5.10*) gki_supported=true ;;
+              5.15*) gki_supported=true ;;
+              6.1*) gki_supported=true ;;
+              6.6*) gki_supported=true ;;
+              *) gki_supported=false ;;
+          esac
+
+          ui_print " "
+          ui_print "=================================="
+          ui_print "       Yannnzkernel Installer     "
+          ui_print "=================================="
+          ui_print " "
+          ui_print "  -> Kernel   : Yannnz34u"
+          ui_print "  -> Device   : malachite / malachite_global"
+          ui_print "  -> Android  : 14"
+          ui_print "  -> Version  : 6.1.177"
+          ui_print " "
+
+          $gki_supported || abort "  -> Non-GKI device, abort."
+
+          split_boot
+
+          if [ -f "$SPLITIMG/ramdisk.cpio" ]; then
+              unpack_ramdisk
+              write_boot
+          else
+              flash_boot
+          fi
+
+          ui_print " "
+          ui_print "  -> Yannnzkernel flashed successfully"
+          ui_print " "
+          EOF
+
+          ZIP_NAME="Yannnz34u-${DEVICE_CODENAME}-a14-6.1.177-$(date +%Y%m%d-%H%M).zip"
+
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
+          cd ..
+
+          echo "ZIP_NAME=${ZIP_NAME}" >> "${GITHUB_ENV}"
+
+      - name: Upload AnyKernel3 zip
+        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: anykernel3-yannnz34u-${{ env.DEVICE_CODENAME }}
+          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
