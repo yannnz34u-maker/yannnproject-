@@ -1,4 +1,4 @@
-name: Build Android Kernel with AnyKernel3
+name: Build Yannnz34u Kernel - Malachite
 
 on:
   workflow_dispatch:
@@ -7,19 +7,25 @@ on:
         description: 'Release tag (e.g., v1.0.0)'
         required: false
         default: ''
+      build_method:
+        description: 'Build method'
+        required: true
+        default: 'make'
+        type: choice
+        options:
+          - make
+          - bazel
   push:
     branches:
-      - main
-      - master
       - android14-6.1
     paths:
-      - 'kernel/**'
       - 'arch/**'
+      - 'kernel/**'
+      - 'build.config.*'
       - '.github/workflows/build.yml'
   pull_request:
     branches:
-      - main
-      - master
+      - android14-6.1
 
 env:
   ARCH: arm64
@@ -27,16 +33,17 @@ env:
   DEVICE: malachite
   KERNEL_NAME: Yannnz34u
   OUT_DIR: out
-  CLANG_VERSION: latest
+  KERNEL_VERSION: 6.1
 
 jobs:
-  build:
-    name: Build Kernel
+  prepare:
+    name: Prepare Build Environment
     runs-on: ubuntu-22.04
     outputs:
-      kernel_image: ${{ steps.build.outputs.image_path }}
       build_date: ${{ steps.metadata.outputs.build_date }}
       build_time: ${{ steps.metadata.outputs.build_time }}
+      commit_hash: ${{ steps.metadata.outputs.commit_hash }}
+      kernel_version: ${{ steps.metadata.outputs.kernel_version }}
 
     steps:
       - name: Checkout source
@@ -50,20 +57,46 @@ jobs:
           BUILD_DATE=$(date '+%Y%m%d')
           BUILD_TIME=$(date '+%H%M')
           COMMIT_HASH=$(git rev-parse --short HEAD)
-          COMMIT_MSG=$(git log -1 --pretty=%s | cut -c1-50)
+          COMMIT_MSG=$(git log -1 --pretty=%s | cut -c1-80)
+          KERNEL_VERSION=$(grep -m 1 '^VERSION = ' Makefile | awk '{print $3}' || echo "6.1")
           
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
           echo "build_time=${BUILD_TIME}" >> $GITHUB_OUTPUT
           echo "commit_hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
-          echo "commit_msg=${COMMIT_MSG}" >> $GITHUB_OUTPUT
+          echo "kernel_version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
           
           {
-            echo "## Build Metadata"
-            echo "- **Date**: ${BUILD_DATE}"
-            echo "- **Time**: ${BUILD_TIME}"
-            echo "- **Commit**: ${COMMIT_HASH}"
-            echo "- **Device**: malachite"
+            echo "## 🔨 Build Information"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Build Date** | ${BUILD_DATE} |"
+            echo "| **Build Time** | ${BUILD_TIME} |"
+            echo "| **Commit** | ${COMMIT_HASH} |"
+            echo "| **Device** | ${DEVICE} |"
+            echo "| **Kernel Version** | ${KERNEL_VERSION} |"
+            echo "| **Branch** | android14-6.1 |"
           } >> $GITHUB_STEP_SUMMARY
+
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    needs: prepare
+    outputs:
+      kernel_image: ${{ steps.build.outputs.image_path }}
+      image_size: ${{ steps.build.outputs.image_size }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          df -h /
 
       - name: Install dependencies
         run: |
@@ -71,118 +104,170 @@ jobs:
           sudo apt-get install -y \
             git curl wget zip unzip bc bison flex make \
             ninja-build gcc g++ clang lld llvm \
-            libssl-dev build-essential python3 cpio rsync \
-            device-tree-compiler libfdt-dev u-boot-tools
+            libssl-dev build-essential python3 python3-pip cpio rsync \
+            device-tree-compiler libfdt-dev u-boot-tools \
+            openjdk-11-jdk-headless
 
       - name: Clone Clang toolchain
         run: |
+          echo "📥 Cloning Clang toolchain..."
           git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
-          ls -lah clang/bin/ | head -20
+          export CLANG_PATH="${PWD}/clang/bin"
+          ${CLANG_PATH}/clang --version
+          echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
 
-      - name: Prepare toolchain
-        run: |
-          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
-          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
-          clang --version
-          echo "CLANG_PATH=${GITHUB_WORKSPACE}/clang/bin" >> $GITHUB_ENV
-
-      - name: Configure kernel
-        run: |
-          mkdir -p ${{ env.OUT_DIR }}
-          make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} ${DEVICE}_defconfig
-          echo "✅ Kernel configured for ${DEVICE}"
-
-      - name: Build kernel image
+      - name: Build with Make
         id: build
+        if: github.event.inputs.build_method != 'bazel'
         run: |
           export PATH="${CLANG_PATH}:$PATH"
-          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="${CLANG_PATH}/../lib:$LD_LIBRARY_PATH"
           
-          echo "🔨 Starting kernel build..."
-          make -j$(nproc) O=${{ env.OUT_DIR }} \
+          echo "🔨 Starting kernel build (Make)..."
+          
+          mkdir -p ${{ env.OUT_DIR }}
+          
+          # Configure kernel
+          echo "⚙️ Configuring kernel..."
+          make O=${{ env.OUT_DIR }} \
+            ARCH=${{ env.ARCH }} \
+            ${{ env.DEVICE }}_defconfig 2>&1 | tail -20
+          
+          # Build kernel
+          echo "🚀 Building kernel image..."
+          time make -j$(nproc) O=${{ env.OUT_DIR }} \
             ARCH=${{ env.ARCH }} \
             CC=clang \
             CXX=clang++ \
             LD=ld.lld \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            2>&1 | tail -50
           
+          # Verify build
           if [ -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" ]; then
-            IMAGE_SIZE=$(ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image | awk '{print $5}')
-            echo "image_path=${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" >> $GITHUB_OUTPUT
-            echo "✅ **Kernel built successfully!**" >> $GITHUB_STEP_SUMMARY
-            echo "- Size: ${IMAGE_SIZE}" >> $GITHUB_STEP_SUMMARY
+            IMAGE_PATH="${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
+            IMAGE_SIZE=$(ls -lh ${IMAGE_PATH} | awk '{print $5}')
+            IMAGE_SIZE_BYTES=$(stat -f%z ${IMAGE_PATH} 2>/dev/null || stat -c%s ${IMAGE_PATH} 2>/dev/null)
+            
+            echo "image_path=${IMAGE_PATH}" >> $GITHUB_OUTPUT
+            echo "image_size=${IMAGE_SIZE}" >> $GITHUB_OUTPUT
+            
+            echo ""
+            echo "✅ **Kernel build SUCCESS**" >> $GITHUB_STEP_SUMMARY
+            echo "- Image: ${IMAGE_PATH}" >> $GITHUB_STEP_SUMMARY
+            echo "- Size: ${IMAGE_SIZE} (${IMAGE_SIZE_BYTES} bytes)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ **Kernel build FAILED!**" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Kernel Image not found at ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" >> $GITHUB_STEP_SUMMARY
+            ls -la ${{ env.OUT_DIR }}/arch/ 2>/dev/null || echo "Output directory not found"
             exit 1
           fi
 
+      - name: Build with Bazel (Alternative)
+        if: github.event.inputs.build_method == 'bazel'
+        run: |
+          echo "⚠️ Bazel build selected - requires Bazel installation"
+          echo "Note: Make build is recommended for this kernel"
+          exit 1
+
       - name: Verify build artifacts
         run: |
-          echo "=== Build Artifacts ==="
-          ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/
-          du -sh ${{ env.OUT_DIR }}/
+          echo "=== Build Output Structure ===" 
+          ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/ 2>/dev/null || echo "Boot directory missing"
+          du -sh ${{ env.OUT_DIR }}/ 2>/dev/null || echo "Output directory check failed"
 
-      - name: Upload kernel image as artifact
+      - name: Upload kernel image
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image-${{ steps.metadata.outputs.build_date }}
+          name: kernel-image-${{ needs.prepare.outputs.build_date }}
           path: ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
           retention-days: 30
           if-no-files-found: error
 
   package:
-    name: Package AnyKernel3 ZIP
-    needs: build
+    name: Package AnyKernel3 ZIP (KernelSU-Next)
     runs-on: ubuntu-22.04
+    needs: [prepare, build]
     if: success()
 
     steps:
-      - name: Checkout source
+      - name: Checkout kernel source
         uses: actions/checkout@v4
 
       - name: Download kernel image
         uses: actions/download-artifact@v4
         with:
-          name: kernel-image-${{ needs.build.outputs.build_date }}
+          name: kernel-image-${{ needs.prepare.outputs.build_date }}
           path: kernel_image/
 
-      - name: Verify AnyKernel3
+      - name: Verify kernel image
         run: |
-          if [ ! -d "anykernel3" ]; then
-            echo "❌ AnyKernel3 directory not found!"
-            echo "Please ensure anykernel3/ directory exists in the repo"
-            ls -la
+          if [ ! -f "kernel_image/Image" ]; then
+            echo "❌ Kernel Image not found!"
             exit 1
           fi
-          ls -lah anykernel3/
+          ls -lh kernel_image/Image
 
-      - name: Clean AnyKernel3 directory
+      - name: Clone KernelSU-Next AnyKernel3
+        run: |
+          echo "📥 Cloning KernelSU-Next AnyKernel3..."
+          git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git anykernel3
+          cd anykernel3
+          ls -lah
+
+      - name: Configure AnyKernel3 for Malachite
         run: |
           cd anykernel3
-          # Remove old kernel
-          rm -f Image Image.gz-dtb zImage
-          rm -rf split_img/
-          rm -rf ramdisk/
-          echo "✅ AnyKernel3 cleaned"
+          
+          # Show current anykernel.sh
+          echo "📋 Current anykernel.sh (first 50 lines):"
+          head -50 anykernel.sh
+          
+          # Backup original
+          cp anykernel.sh anykernel.sh.bak
+          
+          # Configure for malachite device
+          # Update device_block if needed
+          sed -i 's/block=.*;/block=auto;/g' anykernel.sh || true
+          sed -i 's/devicename=".*";/devicename="malachite";/g' anykernel.sh || true
+          sed -i 's/is_slot_device=.*;/is_slot_device=1;/g' anykernel.sh || true
+          
+          echo "✅ AnyKernel3 configured for malachite"
+          echo ""
+          echo "📋 Updated anykernel.sh (first 50 lines):"
+          head -50 anykernel.sh
+
+      - name: Clean old artifacts
+        run: |
+          cd anykernel3
+          echo "🧹 Cleaning old kernel artifacts..."
+          rm -f Image Image.gz-dtb zImage Image.* 
+          rm -rf split_img/ ramdisk/ patch/
+          ls -lah | grep -E "Image|split|ramdisk" || echo "✅ Clean!"
 
       - name: Copy kernel to AnyKernel3
         run: |
           cp kernel_image/Image anykernel3/
+          echo "✅ Kernel Image copied"
           ls -lh anykernel3/Image
 
       - name: Create flashable ZIP
         run: |
           cd anykernel3
           
-          # Ensure proper permissions
+          # Ensure permissions
           chmod +x anykernel.sh
-          chmod +x tools/*
+          chmod -R +x tools/ 2>/dev/null || true
           
-          # Create ZIP with proper structure
-          zip -r9 "${KERNEL_NAME}-${DEVICE}-$(date +%Y%m%d-%H%M).zip" \
+          # Create ZIP name with details
+          ZIP_NAME="${KERNEL_NAME}-malachite-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
+          
+          echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
+          
+          # Create ZIP with proper structure (matching KernelSU-Next)
+          zip -r9 "${ZIP_NAME}" \
             anykernel.sh \
             tools/ \
             META-INF/ \
@@ -190,27 +275,98 @@ jobs:
             LICENSE \
             common/ 2>&1 | head -50
           
-          ls -lh *.zip
+          if [ -f "${ZIP_NAME}" ]; then
+            ls -lh "${ZIP_NAME}"
+            echo "✅ ZIP created successfully"
+            echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          else
+            echo "❌ ZIP creation failed!"
+            exit 1
+          fi
 
-      - name: Generate ZIP hash
+      - name: Generate checksums & verify
         run: |
           cd anykernel3
-          ZIP_FILE=$(ls -t *.zip | head -1)
-          echo "ZIP_FILE=${ZIP_FILE}" >> $GITHUB_ENV
-          sha256sum "${ZIP_FILE}" > "${ZIP_FILE}.sha256"
-          cat "${ZIP_FILE}.sha256"
+          
+          if [ -z "$ZIP_NAME" ]; then
+            ZIP_NAME=$(ls -t *.zip | head -1)
+            echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          fi
+          
+          echo "🔐 Generating checksums for ${ZIP_NAME}..."
+          
+          # SHA256
+          sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
+          SHA256=$(cat "${ZIP_NAME}.sha256" | awk '{print $1}')
+          
+          # MD5
+          md5sum "${ZIP_NAME}" > "${ZIP_NAME}.md5"
+          MD5=$(cat "${ZIP_NAME}.md5" | awk '{print $1}')
+          
+          echo ""
+          echo "📊 Checksum Information:"
+          echo "SHA256: ${SHA256}"
+          echo "MD5: ${MD5}"
+          echo ""
+          
+          # Verify ZIP integrity
+          unzip -t "${ZIP_NAME}" 2>&1 | tail -10
 
       - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: flashable-zip
-          path: anykernel3/*.zip*
+          name: flashable-zip-${{ needs.prepare.outputs.build_date }}
+          path: |
+            anykernel3/*.zip
+            anykernel3/*.sha256
+            anykernel3/*.md5
           retention-days: 30
+          if-no-files-found: error
+
+      - name: Update build summary
+        run: |
+          cd anykernel3
+          ZIP_FILE=$(ls -t *.zip | head -1)
+          ZIP_SIZE=$(ls -lh "${ZIP_FILE}" | awk '{print $5}')
+          SHA256=$(cat "${ZIP_FILE}.sha256" | awk '{print $1}')
+          
+          {
+            echo "## ✅ Package Complete"
+            echo ""
+            echo "### 📦 Flashable ZIP Information"
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Filename** | \`${ZIP_FILE}\` |"
+            echo "| **Size** | ${ZIP_SIZE} |"
+            echo "| **SHA256** | \`${SHA256}\` |"
+            echo ""
+            echo "### 📥 Installation Steps"
+            echo "1. **Boot into Recovery**"
+            echo "   - Power off device"
+            echo "   - Hold Volume + & Power to enter Recovery"
+            echo ""
+            echo "2. **Flash ZIP** (via TWRP/OrangeFox)"
+            echo "   - Install → Select \`${ZIP_FILE}\`"
+            echo "   - Swipe to confirm"
+            echo ""
+            echo "3. **Reboot System**"
+            echo "   - Reboot → System"
+            echo "   - Wait for 1-2 minutes (first boot may take longer)"
+            echo ""
+            echo "### ✔️ Verify Installation"
+            echo "\`\`\`bash"
+            echo "adb shell uname -a"
+            echo "adb shell cat /proc/version | grep -o 'Yannnz34u'"
+            echo "\`\`\`"
+            echo ""
+            echo "---"
+            echo "✨ **Built with GitHub Actions for Yannnz34u Kernel**"
+          } >> $GITHUB_STEP_SUMMARY
 
   release:
     name: Create GitHub Release
-    needs: [build, package]
     runs-on: ubuntu-22.04
+    needs: [prepare, build, package]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''
 
     steps:
@@ -220,51 +376,152 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts/
+          path: release_artifacts/
+
+      - name: Prepare release notes
+        id: release_notes
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B | head -20)
+          echo "commit_msg<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMIT_MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
+          generate_release_notes: true
           body: |
-            # ${{ env.KERNEL_NAME }} Kernel Build
+            # 🔥 Yannnz34u Kernel - ${{ github.event.inputs.release_tag }}
             
-            **Build Date:** ${{ needs.build.outputs.build_date }}
-            **Build Time:** ${{ needs.build.outputs.build_time }}
-            **Device:** ${{ env.DEVICE }}
+            **Build Information:**
+            - Build Date: `${{ needs.prepare.outputs.build_date }}`
+            - Kernel Version: `${{ needs.prepare.outputs.kernel_version }}`
+            - Device: **Poco X7 (malachite)**
+            - Base: **Android 14 Kernel 6.1**
+            - Commit: `${{ needs.prepare.outputs.commit_hash }}`
             
-            ## Artifacts
-            - `kernel-image-*`: Raw kernel Image binary
-            - `flashable-zip/*.zip`: Ready-to-flash AnyKernel3 ZIP package
+            ## 📦 Artifacts
             
-            ## Installation
-            1. Boot into recovery (TWRP/OrangeFox)
-            2. Flash the `.zip` file
-            3. Reboot system
+            ### 🎯 Flashable ZIP (KernelSU-Next AnyKernel3)
+            - Ready-to-flash package with automatic device detection
+            - Compatible with TWRP/OrangeFox Recovery
+            - Includes SHA256 checksum for verification
             
-            ## Changelog
-            See commit history for changes.
+            ### 📄 Kernel Image
+            - Raw kernel binary for advanced users
+            - Direct flashing via fastboot or adb
+            
+            ## 📥 Installation Guide
+            
+            ### ⚡ Quick Install (Recommended)
+            ```
+            1. Download flashable ZIP
+            2. Boot into Recovery (TWRP/OrangeFox)
+            3. Install → Select ZIP file
+            4. Swipe to confirm
+            5. Reboot System
+            ```
+            
+            ### 🔧 Via KernelSU Manager
+            ```
+            1. Open KernelSU Manager
+            2. Kernel Module → Install from storage
+            3. Select flashable ZIP
+            4. Confirm installation
+            5. Reboot
+            ```
+            
+            ### 📱 Advanced: Manual Flash
+            ```bash
+            # Via adb & fastboot
+            adb push kernel-image-* /tmp/
+            adb reboot bootloader
+            fastboot flash boot /tmp/kernel-image
+            fastboot reboot
+            ```
+            
+            ## ⚠️ Important Information
+            
+            **Before Installation:**
+            - ⚠️ Backup current kernel/boot partition
+            - ⚠️ Ensure device is fully charged
+            - ⚠️ Use only on Poco X7 (malachite)
+            - ⚠️ Requires Android 14 based ROM
+            
+            **After Installation:**
+            - ✅ First boot may take 1-2 minutes
+            - ✅ Check system logs if issues occur
+            - ✅ Verify with: `adb shell uname -a`
+            
+            ## 🔐 Verification
+            
+            To verify the download integrity:
+            ```bash
+            # Check SHA256
+            sha256sum Yannnz34u-malachite-*.zip
+            
+            # Compare with provided SHA256 checksum
+            cat Yannnz34u-malachite-*.zip.sha256
+            ```
+            
+            ## 🐛 Support & Bug Reports
+            
+            If you encounter any issues:
+            1. Check kernel logs: `adb logcat -b kernel > kernel.log`
+            2. Get full logcat: `adb logcat > full.log`
+            3. Report on GitHub Issues with:
+               - Device info (ROM, bootloader version)
+               - Full logs and error messages
+               - Steps to reproduce issue
+            
+            ## 📝 Changelog
+            
+            ${{ steps.release_notes.outputs.commit_msg }}
+            
+            **Full Commit History:** [Compare Commits](https://github.com/yannnz34u-maker/yannnproject-/commits/${{ github.ref_name }})
+            
+            ---
+            
+            🎉 **Built with ❤️ using GitHub Actions + KernelSU-Next AnyKernel3**
+            
+            *Last Updated: ${{ needs.prepare.outputs.build_date }}*
           files: |
-            artifacts/**/*
+            release_artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  notify:
-    name: Build Notification
-    needs: [build, package]
+  summary:
+    name: Build Summary
     runs-on: ubuntu-22.04
+    needs: [prepare, build, package]
     if: always()
 
     steps:
-      - name: Build Status Summary
+      - name: Generate summary
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Kernel Build:** ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Package Creation:** ${{ needs.package.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.package.result }}" = "success" ]; then
-            echo "✅ Build completed successfully!" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Build failed! Check logs above." >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "# ✅ Build Complete"
+            echo ""
+            echo "| Item | Status |"
+            echo "|------|--------|"
+            echo "| Prepare | ${{ needs.prepare.result == 'success' && '✅ Success' || '❌ Failed' }} |"
+            echo "| Build | ${{ needs.build.result == 'success' && '✅ Success' || '❌ Failed' }} |"
+            echo "| Package | ${{ needs.package.result == 'success' && '✅ Success' || '❌ Failed' }} |"
+            echo ""
+            
+            if [ "${{ needs.build.result }}" = "success" ]; then
+              echo "## 📊 Build Artifacts"
+              echo "- Kernel Image: ${{ needs.build.outputs.kernel_image }}"
+              echo "- Size: ${{ needs.build.outputs.image_size }}"
+              echo ""
+              echo "## 🎯 Next Steps"
+              echo "1. Download flashable ZIP from Artifacts"
+              echo "2. Boot into recovery"
+              echo "3. Flash the ZIP file"
+              echo "4. Reboot and enjoy! 🎉"
+            else
+              echo "## ❌ Build Failed"
+              echo "Check workflow logs for detailed error messages"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
