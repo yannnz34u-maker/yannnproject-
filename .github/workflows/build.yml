@@ -1,28 +1,8 @@
-name: Build Yannnz34u Kernel - Malachite
+name: Build GKI 2.0 + AnyKernel3 (AOSP Clang 20)
+
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Release tag (e.g., v1.0.0)'
-        required: false
-        default: ''
-      build_method:
-        description: 'Build method'
-        required: true
-        default: 'make'
-        type: choice
-        options:
-          - make
-          - bazel
   push:
-    branches:
-      - android14-6.1
-    paths:
-      - 'arch/'
-      - 'kernel/'
-      - 'build.config.*'
-      - '.github/workflows/build.yml'
-  pull_request:
     branches:
       - android14-6.1
 
@@ -32,62 +12,14 @@ permissions:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  DEVICE: malachite
-  KERNEL_NAME: Yannnz34u
-  OUT_DIR: out
-  KERNEL_VERSION: "6.1"
+  CLANG_VERSION: r536225
 
 jobs:
-  prepare:
-    name: Prepare Build Environment
-    runs-on: ubuntu-22.04
-    outputs:
-      build_date: ${{ steps.metadata.outputs.build_date }}
-      build_time: ${{ steps.metadata.outputs.build_time }}
-      commit_hash: ${{ steps.metadata.outputs.commit_hash }}
-      kernel_version: ${{ steps.metadata.outputs.kernel_version }}
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Generate metadata
-        id: metadata
-        run: |
-          BUILD_DATE=$(date '+%Y%m%d')
-          BUILD_TIME=$(date '+%H%M')
-          COMMIT_HASH=$(git rev-parse --short HEAD)
-          KERNEL_VERSION=$(grep -m 1 '^VERSION = ' Makefile | awk '{print $3}'  echo "6.1")
-          
-          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
-          echo "build_time=${BUILD_TIME}" >> $GITHUB_OUTPUT
-          echo "commit_hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
-          echo "kernel_version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
-          
-          {
-            echo "## 🔨 Build Information"
-            echo ""
-            echo "| Property | Value |"
-            echo "|----------|-------|"
-            echo "| Build Date | ${BUILD_DATE} |"
-            echo "| Build Time | ${BUILD_TIME} |"
-            echo "| Commit | ${COMMIT_HASH} |"
-            echo "| Device | ${{ env.DEVICE }} (GKI) |"
-            echo "| Kernel Version | ${KERNEL_VERSION} |"
-            echo "| Branch | android14-6.1 |"
-          } >> $GITHUB_STEP_SUMMARY
-
   build:
-    name: Build Kernel
+    name: Build & Package GKI 2.0
     runs-on: ubuntu-22.04
-    needs: prepare
-    outputs:
-      kernel_image: ${{ steps.build.outputs.image_path }}
-      image_size: ${{ steps.build.outputs.image_size }}
-
     steps:
+
       - name: Checkout source
         uses: actions/checkout@v4
         with:
@@ -102,231 +34,89 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
-            git curl wget zip unzip bc bison flex make \
-            ninja-build gcc g++ clang lld llvm \
-            libssl-dev build-essential python3 python3-pip cpio rsync \
-            device-tree-compiler libfdt-dev u-boot-tools \
-            openjdk-11-jdk-headless
+          sudo apt-get install -y git curl wget zip unzip bc bison flex make gcc g++ clang lld llvm libssl-dev build-essential python3 python3-pip cpio rsync device-tree-compiler
 
-      - name: Setup AOSP Clang 17 (GKI Compatible)
+      - name: Download AOSP Clang 20
         run: |
-          echo "📥 Mendownload AOSP Clang 17 resmi..."
+          echo "📥 Mendownload AOSP Clang 20 (${CLANG_VERSION})..."
           mkdir -p ${GITHUB_WORKSPACE}/clang
           cd ${GITHUB_WORKSPACE}/clang
-          
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
-          
-          echo "📦 Mengekstrak Clang..."
-          tar -xf clang-r487747c.tar.gz
-          rm clang-r487747c.tar.gz
-          
-          if [ ! -d "${GITHUB_WORKSPACE}/clang/bin" ]; then
-            echo "❌ Gagal menyiapkan Clang!"
+          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz"
+          tar -xf "clang-${CLANG_VERSION}.tar.gz"
+          rm "clang-${CLANG_VERSION}.tar.gz"
+          if [ ! -f "${GITHUB_WORKSPACE}/clang/bin/clang" ]; then
+            echo "❌ Gagal menyiapkan Clang 20!"
             exit 1
           fi
-          echo "✅ AOSP Clang 17 siap digunakan."
+          echo "${GITHUB_WORKSPACE}/clang/bin" >> $GITHUB_PATH
+          echo "✅ Clang 20 siap digunakan."
 
-      - name: Verify & test Clang
+      - name: Verify Clang
         run: |
-          export CLANG_PATH="${GITHUB_WORKSPACE}/clang/bin"
-          
-          echo "🔍 Verifying Clang binary..."
-          ${CLANG_PATH}/clang --version
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
+          clang --version | head -n 3
 
-Yannz_#AFK, [10/1/26, 19:03]
-
-          if [ $? -eq 0 ]; then
-            echo "✅ Clang verified & working"
-            echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
-          else
-            echo "❌ Clang test failed"
-            exit 1
-          fi
-
-      - name: Build with Make (GKI)
-        id: build
-        if: github.event.inputs.build_method != 'bazel'
+      - name: Build GKI 2.0
         run: |
-          export PATH="${CLANG_PATH}:$PATH"
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
           export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
-          
-          echo "🔨 Starting kernel build (Make)..."
-          mkdir -p ${{ env.OUT_DIR }}
-          
-          echo "⚙️ Configuring GKI kernel..."
-          make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} gki_defconfig
-          
-          echo "🚀 Building kernel image..."
-          time make -j$(nproc) O=${{ env.OUT_DIR }} \
-            ARCH=${{ env.ARCH }} \
-            CC=clang \
-            CXX=clang++ \
-            LD=ld.lld \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          
-          IMAGE_PATH="${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
-          if [ -f "${IMAGE_PATH}" ]; then
-            IMAGE_SIZE=$(ls -lh ${IMAGE_PATH} | awk '{print $5}')
-            
-            echo "image_path=${IMAGE_PATH}" >> $GITHUB_OUTPUT
-            echo "image_size=${IMAGE_SIZE}" >> $GITHUB_OUTPUT
-            
-            echo "✅ Kernel build SUCCESS" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Kernel Image not found!" >> $GITHUB_STEP_SUMMARY
+          mkdir -p out
+          echo "⚙️  Menggunakan gki_defconfig..."
+          make O=out ARCH=arm64 gki_defconfig
+          echo "🚀 Kompilasi kernel..."
+          make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1
+
+      - name: Check kernel image
+        run: |
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -f "${IMAGE}" ]; then
+            echo "❌ Kernel Image tidak ditemukan!"
             exit 1
           fi
+          ls -lh "${IMAGE}"
 
-      - name: Upload kernel image
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-image-${{ needs.prepare.outputs.build_date }}
-          path: ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
-          retention-days: 30
-          if-no-files-found: error
-
-  package:
-    name: Package AnyKernel3 ZIP (KernelSU-Next)
-    runs-on: ubuntu-22.04
-    needs: [prepare, build]
-    if: success()
-
-    steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-
-      - name: Download kernel image
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-image-${{ needs.prepare.outputs.build_date }}
-          path: kernel_image/
-
-      - name: Clone KernelSU-Next AnyKernel3
+      - name: Clone AnyKernel3 (KernelSU-Next)
         run: |
-          echo "📥 Cloning KernelSU-Next AnyKernel3..."
           git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git anykernel3
 
       - name: Configure AnyKernel3 for Malachite
         run: |
           cd anykernel3
-          
-          echo "⚙️ Mengonfigurasi anykernel.sh..."
-          
-          set_var() {
-            local key=$1
-            local value=$2
-            if grep -q "^${key}=" anykernel.sh; then
-              sed -i "s|^${key}=.*|${key}=${value}|" anykernel.sh
+          set_prop() {
+            key="$1"
+            value="$2"
+            file="anykernel.sh"
+            if grep -q "^${key}=" "$file"; then
+              sed -i "s|^${key}=.*|${key}=${value}|" "$file"
             else
-              echo "${key}=${value}" >> anykernel.sh
+              echo "${key}=${value}" >> "$file"
             fi
           }
+          set_prop "device.name1" "malachite"
+          set_prop "block" "boot"
+          chmod +x anykernel.sh
+          echo "✅ Konfigurasi anykernel.sh selesai."
 
-          set_var "block" "boot"
-          set_var "is_slot_device" "auto"
-          set_var "ramdisk_compression" "auto"
-          set_var "patch_vbmeta_flag" "auto"
-          set_var "no_magisk_check" "1"
-          set_var "device.name1" "malachite"
-          
-          echo "✅ Konfigurasi anykernel.sh berhasil diperbarui."
-
-      - name: Clean old artifacts & Copy kernel
+      - name: Prepare AnyKernel3
         run: |
           cd anykernel3
-          rm -f Image Image.gz-dtb zImage Image.* 
+          rm -f Image Image.gz-dtb zImage Image.*
           rm -rf split_img/ ramdisk/ patch/
-          
-          cp ../kernel_image/Image .
-          echo "✅ Kernel Image copied to AnyKernel3"
+          cp ../out/arch/arm64/boot/Image .
+          echo "✅ Kernel Image disalin ke AnyKernel3."
 
       - name: Create flashable ZIP
         run: |
           cd anykernel3
-          chmod +x anykernel.sh
-          chmod -R +x tools/ 2>/dev/null  true
-          
-          ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-GKI-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
-          echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
-          
-          zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak" ".git/*" ".github/*"
-
-Yannz_#AFK, [10/1/26, 19:03]
-if [ -f "${ZIP_NAME}" ]; then
-            echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          else
-            echo "❌ ZIP creation failed!"
-            exit 1
-          fi
-
-      - name: Generate checksums
-        run: |
-          cd anykernel3
-          sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
-          md5sum "${ZIP_NAME}" > "${ZIP_NAME}.md5"
+          ZIP_NAME="GKI2-Malachite-$(date +%Y%m%d-%H%M).zip"
+          echo "📦 Membuat ZIP: ${ZIP_NAME}"
+          zip -r9 "${ZIP_NAME}" . -x ".git/*" ".github/*" "${ZIP_NAME}"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          ls -lh "${ZIP_NAME}"
 
       - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: flashable-zip-${{ needs.prepare.outputs.build_date }}
-          path: |
-            anykernel3/*.zip
-            anykernel3/*.sha256
-            anykernel3/*.md5
+          name: gki2-anykernel3-malachite
+          path: anykernel3/*.zip
           retention-days: 30
-          if-no-files-found: error
-
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-22.04
-    needs: [prepare, build, package]
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release_artifacts/
-
-      - name: Prepare release notes
-        id: release_notes
-        run: |
-          COMMIT_MSG=$(git log -1 --pretty=%B | head -20)
-          echo "commit_msg<<EOF" >> $GITHUB_OUTPUT
-          echo "$COMMIT_MSG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          generate_release_notes: true
-          body: |
-            # 🔥 Yannnz34u Kernel (GKI) - ${{ github.event.inputs.release_tag }}
-            
-            Build Information:
-            - Build Date: ${{ needs.prepare.outputs.build_date }}
-            - Kernel Version: ${{ needs.prepare.outputs.kernel_version }}
-            - Device: Poco X7 (malachite)
-            - Base: Android 14 Kernel 6.1 GKI
-            
-            ## 📥 Installation Guide
-            1. Download flashable ZIP di bawah.
-            2. Boot into Recovery (TWRP/OrangeFox).
-            3. Install → Select ZIP file → Swipe to confirm.
-            4. Reboot System.
-          files: |
-            release_artifacts/*/*.zip
-            release_artifacts/*/*.sha256
-            release_artifacts/*/*.md5
-            release_artifacts/*/Image
-        env:
-          GITHUB_TOKEN: ${{ secrets.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 }}
