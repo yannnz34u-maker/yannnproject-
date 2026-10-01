@@ -1,291 +1,56 @@
-name: Build Yannnz34u Kernel
+name: Build Android Kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      neutron_url:
-        description: "Direct download URL Neutron Clang release asset (.tar.zst/.tar.gz/.tar.xz/.zip)"
-        required: true
-        default: ""
-        type: string
-
-      build_anykernel:
-        description: "Build AnyKernel3 zip"
-        required: true
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-
-      enable_rekernel:
-        description: "Enable Re:Kernel feature packaging"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "true"
-          - "false"
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-
-    env:
-      ARCH: arm64
-      SUBARCH: arm64
-      DEFCONFIG: gki_defconfig
-      OUT_DIR: ${{ github.workspace }}/out
-
-      KBUILD_BUILD_USER: github-actions
-      KBUILD_BUILD_HOST: github
-      TZ: Asia/Jakarta
-
-      KERNEL_NAME: Yannnz34u
-      UI_NAME: Yannnzkernel
-
-      DEVICE_CODENAME: malachite
-      DEVICE_CODENAME_ALT: malachite_global
-      DEVICE_NAME: "Poco X7 / Redmi Note 14 Pro 5G"
-
-      REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout kernel source
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Set timezone
-        run: sudo timedatectl set-timezone "${TZ}"
 
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
-            git curl wget unzip zip rsync bc bison flex cpio \
-            build-essential libssl-dev libelf-dev pahole \
-            python3 python-is-python3 xz-utils zstd lz4 file \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+            git curl wget zip unzip bc bison flex make ninja-build \
+            gcc g++ clang lld llvm libssl-dev build-essential \
+            python3 cpio rsync
 
-      - name: Validate Neutron URL
+      - name: Set up build environment
         run: |
-          if [ -z "${{ github.event.inputs.neutron_url }}" ]; then
-            echo "ERROR: neutron_url is empty."
-            exit 1
-          fi
-          echo "Neutron URL set."
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
 
-      - name: Download Neutron Clang
+      - name: Clone clang
         run: |
-          mkdir -p clang
-          cd /tmp
-          URL="${{ github.event.inputs.neutron_url }}"
-          FILE="neutron.pkg"
-          echo "Downloading: $URL"
-          wget -O "$FILE" "$URL"
-          MIME=$(file -b "$FILE")
-          echo "Downloaded file type: $MIME"
-          case "$URL" in
-            *.tar.zst|*.tzst)
-              tar --use-compress-program=unzstd -xf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
-              ;;
-            *.tar.gz|*.tgz)
-              tar -xzf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
-              ;;
-            *.tar.xz)
-              tar -xJf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
-              ;;
-            *.zip)
-              unzip -q "$FILE" -d "${GITHUB_WORKSPACE}/clang"
-              ;;
-            *)
-              echo "Unknown archive format from URL: $URL"
-              exit 1
-              ;;
-          esac
+          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
 
-          test -x "${GITHUB_WORKSPACE}/clang/bin/clang" || {
-            echo "clang binary not found after extraction!"
-            find "${GITHUB_WORKSPACE}/clang" -maxdepth 3 -type f | head -100
-            exit 1
-          }
-
-      - name: Export Neutron to PATH
+      - name: Prepare toolchain path
         run: |
           echo "${GITHUB_WORKSPACE}/clang/bin" >> $GITHUB_PATH
 
-      - name: Show tool versions
+      - name: Configure kernel
         run: |
-          echo "PATH=$PATH"
-          which clang
-          clang --version
-          ld.lld --version || true
-          llvm-ar --version || true
-          aarch64-linux-gnu-gcc --version || true
-          arm-linux-gnueabi-gcc --version || true
-
-      - name: Optional Re:Kernel fetch
-        if: ${{ github.event.inputs.enable_rekernel == 'true' }}
-        run: |
-          git clone --depth=1 "${REKERNEL_REPO}" /tmp/Re-Kernel
-          mkdir -p /tmp/feature_pack/rekernel
-          cp -a /tmp/Re-Kernel/. /tmp/feature_pack/rekernel/ || true
-          echo "Re:Kernel fetched."
-
-      - name: Prepare output directory
-        run: mkdir -p "${OUT_DIR}"
-
-      - name: Generate defconfig
-        run: |
-          make O="${OUT_DIR}" \
-            ARCH="${ARCH}" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            "${DEFCONFIG}"
-
-      - name: Olddefconfig
-        run: |
-          make O="${OUT_DIR}" \
-            ARCH="${ARCH}" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            olddefconfig
+          make O=out ARCH=arm64 malachite_defconfig
 
       - name: Build kernel
         run: |
-          make -j"$(nproc --all)" \
-            O="${OUT_DIR}" \
-            ARCH="${ARCH}" \
-            LLVM=1 \
-            LLVM_IAS=1 \
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
             CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1
 
-      - name: Detect kernel image
-        id: detect
-        run: |
-          IMAGE=""
-          for f in \
-            "${OUT_DIR}/arch/arm64/boot/Image" \
-            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
-            "${OUT_DIR}/arch/arm64/boot/Image.lz4" \
-            "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb"
-          do
-            if [ -f "$f" ]; then
-              IMAGE="$f"
-              break
-            fi
-          done
-
-          if [ -z "$IMAGE" ]; then
-            echo "Kernel image not found!"
-            find "${OUT_DIR}/arch/arm64/boot" -type f || true
-            exit 1
-          fi
-
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "Found image: $IMAGE"
-
-      - name: Prepare artifacts
-        run: |
-          mkdir -p artifacts
-          cp "${{ steps.detect.outputs.image }}" artifacts/
-          cp "${OUT_DIR}/.config" artifacts/kernel.config || true
-          cp "${OUT_DIR}/Module.symvers" artifacts/ 2>/dev/null || true
-          cp "${OUT_DIR}/System.map" artifacts/ 2>/dev/null || true
-
-      - name: Upload kernel artifacts
+      - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
-          name: yannnz34u-kernel-${{ env.DEVICE_CODENAME }}
-          path: artifacts/*
-
-      - name: Build AnyKernel3 zip
-        if: ${{ github.event.inputs.build_anykernel == 'true' }}
-        run: |
-          git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git AnyKernel3
-          cp "${{ steps.detect.outputs.image }}" AnyKernel3/Image
-
-          mkdir -p AnyKernel3/feature
-          if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ] && [ -d /tmp/feature_pack/rekernel ]; then
-            mkdir -p AnyKernel3/feature/rekernel
-            cp -a /tmp/feature_pack/rekernel/. AnyKernel3/feature/rekernel/ || true
-          fi
-
-          cat > AnyKernel3/anykernel.sh <<'EOF'
-          ## AnyKernel3 Ramdisk Mod Script
-
-          properties() { '
-          kernel.string=Yannnz34u for Poco X7 / Redmi Note 14 Pro 5G
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          do.check_boot_version=0
-          device.name1=malachite
-          device.name2=malachite_global
-          device.name3=
-          device.name4=
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; }
-
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          no_magisk_check=1
-
-          . tools/ak3-core.sh
-
-          kernel_version=$(uname -r)
-          case $kernel_version in
-            5.10*|5.15*|6.1*|6.6*) gki_supported=true ;;
-            *) gki_supported=false ;;
-          esac
-
-          ui_print " "
-          ui_print "=================================="
-          ui_print "       Yannnzkernel Installer     "
-          ui_print "=================================="
-          ui_print " "
-          ui_print "  -> Kernel   : Yannnz34u"
-          ui_print "  -> Device   : malachite / malachite_global"
-          ui_print "  -> Target   : boot"
-          ui_print " "
-
-          $gki_supported || abort "  -> Non-GKI device, abort."
-
-          flash_boot
-
-          ui_print " "
-          ui_print "  -> Yannnzkernel flashed successfully"
-          ui_print " "
-          EOF
-
-          ZIP_NAME="Yannnz34u-${DEVICE_CODENAME}-$(date +%Y%m%d-%H%M).zip"
-          cd AnyKernel3
-          zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
-          cd ..
-          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
-
-      - name: Upload AnyKernel3 zip
-        if: ${{ github.event.inputs.build_anykernel == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: anykernel3-yannnz34u-${{ env.DEVICE_CODENAME }}
-          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+          name: kernel-image
+          path: out/arch/arm64/boot/Image
