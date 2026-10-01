@@ -3,6 +3,12 @@ name: Build Yannnz34u Kernel
 on:
   workflow_dispatch:
     inputs:
+      neutron_url:
+        description: "Direct download URL Neutron Clang release asset (.tar.zst/.tar.gz/.tar.xz)"
+        required: true
+        default: ""
+        type: string
+
       build_anykernel:
         description: "Build AnyKernel3 zip"
         required: true
@@ -46,8 +52,6 @@ jobs:
 
       REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
 
-      NEUTRON_URL: "https://github.com/USERNAME/REPO/releases/download/TAG/neutron-clang.tar.zst"
-
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
@@ -63,15 +67,56 @@ jobs:
           sudo apt install -y \
             git curl wget unzip zip rsync bc bison flex cpio \
             build-essential libssl-dev libelf-dev pahole \
-            python3 python-is-python3 xz-utils zstd lz4 \
+            python3 python-is-python3 xz-utils zstd lz4 file \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Validate Neutron URL
+        run: |
+          if [ -z "${{ github.event.inputs.neutron_url }}" ]; then
+            echo "ERROR: neutron_url is empty."
+            exit 1
+          fi
+          echo "Neutron URL set."
 
       - name: Download Neutron Clang
         run: |
           mkdir -p clang
-          wget -O /tmp/neutron.tar.zst "${NEUTRON_URL}"
-          tar --use-compress-program=unzstd -xf /tmp/neutron.tar.zst -C clang --strip-components=1
+          cd /tmp
+
+          URL="${{ github.event.inputs.neutron_url }}"
+          FILE="neutron.pkg"
+
+          echo "Downloading: $URL"
+          wget -O "$FILE" "$URL"
+
+          MIME=$(file -b "$FILE")
+          echo "Downloaded file type: $MIME"
+
+          case "$URL" in
+            *.tar.zst|*.tzst)
+              tar --use-compress-program=unzstd -xf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
+              ;;
+            *.tar.gz|*.tgz)
+              tar -xzf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
+              ;;
+            *.tar.xz)
+              tar -xJf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
+              ;;
+            *.zip)
+              unzip -q "$FILE" -d "${GITHUB_WORKSPACE}/clang"
+              ;;
+            *)
+              echo "Unknown archive format from URL: $URL"
+              exit 1
+              ;;
+          esac
+
+          test -x "${GITHUB_WORKSPACE}/clang/bin/clang" || {
+            echo "clang binary not found after extraction!"
+            find "${GITHUB_WORKSPACE}/clang" -maxdepth 3 -type f | head -100
+            exit 1
+          }
 
       - name: Export Neutron to PATH
         run: |
@@ -79,10 +124,13 @@ jobs:
 
       - name: Show tool versions
         run: |
+          echo "PATH=$PATH"
           which clang
           clang --version
           ld.lld --version || true
+          llvm-ar --version || true
           aarch64-linux-gnu-gcc --version || true
+          arm-linux-gnueabi-gcc --version || true
 
       - name: Optional Re:Kernel fetch
         if: ${{ github.event.inputs.enable_rekernel == 'true' }}
@@ -97,22 +145,36 @@ jobs:
 
       - name: Generate defconfig
         run: |
-          make O="${OUT_DIR}" ARCH=arm64 LLVM=1 LLVM_IAS=1 ${DEFCONFIG}
+          make O="${OUT_DIR}" \
+            ARCH="${ARCH}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            "${DEFCONFIG}"
 
       - name: Olddefconfig
         run: |
-          make O="${OUT_DIR}" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          make O="${OUT_DIR}" \
+            ARCH="${ARCH}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            olddefconfig
 
       - name: Build kernel
         run: |
           make -j"$(nproc --all)" \
             O="${OUT_DIR}" \
-            ARCH=arm64 \
+            ARCH="${ARCH}" \
             LLVM=1 \
             LLVM_IAS=1 \
             CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
       - name: Detect kernel image
         id: detect
@@ -136,7 +198,7 @@ jobs:
             exit 1
           fi
 
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "Found image: $IMAGE"
 
       - name: Prepare artifacts
@@ -167,8 +229,7 @@ jobs:
           fi
 
           cat > AnyKernel3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
+          ## AnyKernel3 Ramdisk Mod Script
 
           properties() { '
           kernel.string=Yannnz34u for Poco X7 / Redmi Note 14 Pro 5G
@@ -186,7 +247,7 @@ jobs:
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
-          '; } # end properties
+          '; }
 
           block=boot
           is_slot_device=auto
@@ -198,10 +259,7 @@ jobs:
 
           kernel_version=$(cat /proc/version | awk -F '-' '{print $1}' | awk '{print $3}')
           case $kernel_version in
-              5.10*) gki_supported=true ;;
-              5.15*) gki_supported=true ;;
-              6.1*) gki_supported=true ;;
-              6.6*) gki_supported=true ;;
+              5.10*|5.15*|6.1*|6.6*) gki_supported=true ;;
               *) gki_supported=false ;;
           esac
 
@@ -236,7 +294,7 @@ jobs:
           zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
           cd ..
 
-          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
       - name: Upload AnyKernel3 zip
         if: ${{ github.event.inputs.build_anykernel == 'true' }}
