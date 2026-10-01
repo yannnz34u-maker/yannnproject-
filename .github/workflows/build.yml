@@ -27,13 +27,16 @@ on:
     branches:
       - android14-6.1
 
+permissions:
+  contents: write
+
 env:
   ARCH: arm64
   SUBARCH: arm64
   DEVICE: malachite
   KERNEL_NAME: Yannnz34u
   OUT_DIR: out
-  KERNEL_VERSION: 6.1
+  KERNEL_VERSION: "6.1"
 
 jobs:
   prepare:
@@ -57,7 +60,6 @@ jobs:
           BUILD_DATE=$(date '+%Y%m%d')
           BUILD_TIME=$(date '+%H%M')
           COMMIT_HASH=$(git rev-parse --short HEAD)
-          COMMIT_MSG=$(git log -1 --pretty=%s | cut -c1-80)
           KERNEL_VERSION=$(grep -m 1 '^VERSION = ' Makefile | awk '{print $3}' || echo "6.1")
           
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
@@ -73,7 +75,7 @@ jobs:
             echo "| **Build Date** | ${BUILD_DATE} |"
             echo "| **Build Time** | ${BUILD_TIME} |"
             echo "| **Commit** | ${COMMIT_HASH} |"
-            echo "| **Device** | ${DEVICE} |"
+            echo "| **Device** | ${{ env.DEVICE }} |"
             echo "| **Kernel Version** | ${KERNEL_VERSION} |"
             echo "| **Branch** | android14-6.1 |"
           } >> $GITHUB_STEP_SUMMARY
@@ -108,54 +110,15 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-      - name: Clone Clang toolchain (dengan retry)
+      - name: Clone Clang toolchain
         run: |
           echo "📥 Cloning Clang toolchain dari ZyCromerZ..."
+          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
           
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          CLONE_SUCCESS=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            if git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang 2>&1; then
-              echo "✅ Clang repository cloned successfully"
-              CLONE_SUCCESS=1
-              break
-            else
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              echo "⚠️ Clone attempt $RETRY_COUNT failed"
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "Retrying in 10 seconds..."
-                rm -rf clang 2>/dev/null
-                sleep 10
-              fi
-            fi
-          done
-          
-          if [ $CLONE_SUCCESS -ne 1 ]; then
-            echo "❌ Failed to clone after $MAX_RETRIES attempts"
-            echo "Trying alternative approach..."
-            exit 1
-          fi
-          
-          # Verify clone succeeded
-          if [ ! -d "clang" ]; then
-            echo "❌ clang directory not created"
-            exit 1
-          fi
-          
-          # List clang contents
-          echo ""
-          echo "📋 Clang directory structure:"
-          ls -lah clang/ | head -15
-          
-          # Verify bin directory
           if [ ! -d "clang/bin" ]; then
             echo "❌ clang/bin directory missing!"
             exit 1
           fi
-          
-          echo ""
           echo "✅ Clang setup successful"
 
       - name: Verify & test Clang
@@ -164,24 +127,13 @@ jobs:
           export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
           
           echo "🔍 Verifying Clang binary..."
-          
-          # Check binary exists
-          if [ ! -f "${CLANG_PATH}/clang" ]; then
-            echo "❌ clang binary not found at ${CLANG_PATH}/clang"
-            echo "Directory contents:"
-            ls -la "${CLANG_PATH}/" | head -20
-            exit 1
-          fi
-          
-          # Test binary
-          echo "🧪 Testing Clang..."
           ${CLANG_PATH}/clang --version
           
           if [ $? -eq 0 ]; then
             echo "✅ Clang verified & working"
             echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
           else
-            echo "❌ Clang test failed (exit code: $?)"
+            echo "❌ Clang test failed"
             exit 1
           fi
 
@@ -193,16 +145,11 @@ jobs:
           export LD_LIBRARY_PATH="${CLANG_PATH}/../lib:$LD_LIBRARY_PATH"
           
           echo "🔨 Starting kernel build (Make)..."
-          
           mkdir -p ${{ env.OUT_DIR }}
           
-          # Configure kernel
           echo "⚙️ Configuring kernel..."
-          make O=${{ env.OUT_DIR }} \
-            ARCH=${{ env.ARCH }} \
-            ${{ env.DEVICE }}_defconfig 2>&1 | tail -20
+          make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} ${{ env.DEVICE }}_defconfig
           
-          # Build kernel
           echo "🚀 Building kernel image..."
           time make -j$(nproc) O=${{ env.OUT_DIR }} \
             ARCH=${{ env.ARCH }} \
@@ -211,40 +158,20 @@ jobs:
             LD=ld.lld \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            2>&1 | tail -50
+            CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Verify build
-          if [ -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" ]; then
-            IMAGE_PATH="${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
+          IMAGE_PATH="${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
+          if [ -f "${IMAGE_PATH}" ]; then
             IMAGE_SIZE=$(ls -lh ${IMAGE_PATH} | awk '{print $5}')
-            IMAGE_SIZE_BYTES=$(stat -f%z ${IMAGE_PATH} 2>/dev/null || stat -c%s ${IMAGE_PATH} 2>/dev/null)
             
             echo "image_path=${IMAGE_PATH}" >> $GITHUB_OUTPUT
             echo "image_size=${IMAGE_SIZE}" >> $GITHUB_OUTPUT
             
-            echo ""
             echo "✅ **Kernel build SUCCESS**" >> $GITHUB_STEP_SUMMARY
-            echo "- Image: ${IMAGE_PATH}" >> $GITHUB_STEP_SUMMARY
-            echo "- Size: ${IMAGE_SIZE} (${IMAGE_SIZE_BYTES} bytes)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ Kernel Image not found at ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" >> $GITHUB_STEP_SUMMARY
-            ls -la ${{ env.OUT_DIR }}/arch/ 2>/dev/null || echo "Output directory not found"
+            echo "❌ Kernel Image not found!" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-
-      - name: Build with Bazel (Alternative)
-        if: github.event.inputs.build_method == 'bazel'
-        run: |
-          echo "⚠️ Bazel build selected - requires Bazel installation"
-          echo "Note: Make build is recommended for this kernel"
-          exit 1
-
-      - name: Verify build artifacts
-        run: |
-          echo "=== Build Output Structure ===" 
-          ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/ 2>/dev/null || echo "Boot directory missing"
-          du -sh ${{ env.OUT_DIR }}/ 2>/dev/null || echo "Output directory check failed"
 
       - name: Upload kernel image
         if: success()
@@ -271,115 +198,72 @@ jobs:
           name: kernel-image-${{ needs.prepare.outputs.build_date }}
           path: kernel_image/
 
-      - name: Verify kernel image
-        run: |
-          if [ ! -f "kernel_image/Image" ]; then
-            echo "❌ Kernel Image not found!"
-            exit 1
-          fi
-          ls -lh kernel_image/Image
-
       - name: Clone KernelSU-Next AnyKernel3
         run: |
           echo "📥 Cloning KernelSU-Next AnyKernel3..."
           git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git anykernel3
-          cd anykernel3
-          ls -lah
 
       - name: Configure AnyKernel3 for Malachite
         run: |
           cd anykernel3
           
-          # Show current anykernel.sh
-          echo "📋 Current anykernel.sh (first 50 lines):"
-          head -50 anykernel.sh
+          echo "⚙️ Mengonfigurasi anykernel.sh..."
           
-          # Backup original
-          cp anykernel.sh anykernel.sh.bak
-          
-          # Configure for malachite device
-          # Update device_block if needed
-          sed -i 's/block=.*;/block=auto;/g' anykernel.sh || true
-          sed -i 's/devicename=".*";/devicename="malachite";/g' anykernel.sh || true
-          sed -i 's/is_slot_device=.*;/is_slot_device=1;/g' anykernel.sh || true
-          
-          echo "✅ AnyKernel3 configured for malachite"
-          echo ""
-          echo "📋 Updated anykernel.sh (first 50 lines):"
-          head -50 anykernel.sh
+          # Fungsi bash untuk update variabel (replace jika ada, append jika tidak)
+          set_var() {
+            local key=$1
+            local value=$2
+            if grep -q "^${key}=" anykernel.sh; then
+              sed -i "s|^${key}=.*|${key}=${value}|" anykernel.sh
+            else
+              echo "${key}=${value}" >> anykernel.sh
+            fi
+          }
 
-      - name: Clean old artifacts
+          # Terapkan konfigurasi yang Anda minta
+          set_var "block" "boot"
+          set_var "is_slot_device" "auto"
+          set_var "ramdisk_compression" "auto"
+          set_var "patch_vbmeta_flag" "auto"
+          set_var "no_magisk_check" "1"
+          
+          echo "✅ Konfigurasi anykernel.sh berhasil diperbarui:"
+          grep -E "block=|is_slot_device=|ramdisk_compression=|patch_vbmeta_flag=|no_magisk_check=" anykernel.sh
+
+      - name: Clean old artifacts & Copy kernel
         run: |
           cd anykernel3
-          echo "🧹 Cleaning old kernel artifacts..."
           rm -f Image Image.gz-dtb zImage Image.* 
           rm -rf split_img/ ramdisk/ patch/
-          ls -lah | grep -E "Image|split|ramdisk" || echo "✅ Clean!"
-
-      - name: Copy kernel to AnyKernel3
-        run: |
-          cp kernel_image/Image anykernel3/
-          echo "✅ Kernel Image copied"
-          ls -lh anykernel3/Image
+          
+          cp ../kernel_image/Image .
+          echo "✅ Kernel Image copied to AnyKernel3"
 
       - name: Create flashable ZIP
         run: |
           cd anykernel3
-          
-          # Ensure permissions
           chmod +x anykernel.sh
           chmod -R +x tools/ 2>/dev/null || true
           
-          # Create ZIP name with details
-          ZIP_NAME="${KERNEL_NAME}-malachite-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
-          
+          ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
           echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
           
-          # Create ZIP with proper structure (matching KernelSU-Next)
-          zip -r9 "${ZIP_NAME}" \
-            anykernel.sh \
-            tools/ \
-            META-INF/ \
-            Image \
-            LICENSE \
-            common/ 2>&1 | head -50
+          zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak"
           
           if [ -f "${ZIP_NAME}" ]; then
             ls -lh "${ZIP_NAME}"
-            echo "✅ ZIP created successfully"
             echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           else
             echo "❌ ZIP creation failed!"
             exit 1
           fi
 
-      - name: Generate checksums & verify
+      - name: Generate checksums
         run: |
           cd anykernel3
-          
-          if [ -z "$ZIP_NAME" ]; then
-            ZIP_NAME=$(ls -t *.zip | head -1)
-            echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          fi
-          
-          echo "🔐 Generating checksums for ${ZIP_NAME}..."
-          
-          # SHA256
           sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
-          SHA256=$(cat "${ZIP_NAME}.sha256" | awk '{print $1}')
-          
-          # MD5
           md5sum "${ZIP_NAME}" > "${ZIP_NAME}.md5"
-          MD5=$(cat "${ZIP_NAME}.md5" | awk '{print $1}')
-          
-          echo ""
-          echo "📊 Checksum Information:"
-          echo "SHA256: ${SHA256}"
-          echo "MD5: ${MD5}"
-          echo ""
-          
-          # Verify ZIP integrity
-          unzip -t "${ZIP_NAME}" 2>&1 | tail -10
+          echo "✅ Checksums generated"
 
       - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
@@ -391,46 +275,6 @@ jobs:
             anykernel3/*.md5
           retention-days: 30
           if-no-files-found: error
-
-      - name: Update build summary
-        run: |
-          cd anykernel3
-          ZIP_FILE=$(ls -t *.zip | head -1)
-          ZIP_SIZE=$(ls -lh "${ZIP_FILE}" | awk '{print $5}')
-          SHA256=$(cat "${ZIP_FILE}.sha256" | awk '{print $1}')
-          
-          {
-            echo "## ✅ Package Complete"
-            echo ""
-            echo "### 📦 Flashable ZIP Information"
-            echo "| Property | Value |"
-            echo "|----------|-------|"
-            echo "| **Filename** | \`${ZIP_FILE}\` |"
-            echo "| **Size** | ${ZIP_SIZE} |"
-            echo "| **SHA256** | \`${SHA256}\` |"
-            echo ""
-            echo "### 📥 Installation Steps"
-            echo "1. **Boot into Recovery**"
-            echo "   - Power off device"
-            echo "   - Hold Volume + & Power to enter Recovery"
-            echo ""
-            echo "2. **Flash ZIP** (via TWRP/OrangeFox)"
-            echo "   - Install → Select \`${ZIP_FILE}\`"
-            echo "   - Swipe to confirm"
-            echo ""
-            echo "3. **Reboot System**"
-            echo "   - Reboot → System"
-            echo "   - Wait for 1-2 minutes (first boot may take longer)"
-            echo ""
-            echo "### ✔️ Verify Installation"
-            echo "\`\`\`bash"
-            echo "adb shell uname -a"
-            echo "adb shell cat /proc/version | grep -o 'Yannnz34u'"
-            echo "\`\`\`"
-            echo ""
-            echo "---"
-            echo "✨ **Built with GitHub Actions for Yannnz34u Kernel**"
-          } >> $GITHUB_STEP_SUMMARY
 
   release:
     name: Create GitHub Release
@@ -456,7 +300,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
           generate_release_notes: true
@@ -470,127 +314,18 @@ jobs:
             - Base: **Android 14 Kernel 6.1**
             - Commit: `${{ needs.prepare.outputs.commit_hash }}`
             
-            ## 📦 Artifacts
-            
-            ### 🎯 Flashable ZIP (KernelSU-Next AnyKernel3)
-            - Ready-to-flash package with automatic device detection
-            - Compatible with TWRP/OrangeFox Recovery
-            - Includes SHA256 checksum for verification
-            
-            ### 📄 Kernel Image
-            - Raw kernel binary for advanced users
-            - Direct flashing via fastboot or adb
-            
             ## 📥 Installation Guide
-            
-            ### ⚡ Quick Install (Recommended)
-            ```
-            1. Download flashable ZIP
-            2. Boot into Recovery (TWRP/OrangeFox)
-            3. Install → Select ZIP file
-            4. Swipe to confirm
-            5. Reboot System
-            ```
-            
-            ### 🔧 Via KernelSU Manager
-            ```
-            1. Open KernelSU Manager
-            2. Kernel Module → Install from storage
-            3. Select flashable ZIP
-            4. Confirm installation
-            5. Reboot
-            ```
-            
-            ### 📱 Advanced: Manual Flash
-            ```bash
-            # Via adb & fastboot
-            adb push kernel-image-* /tmp/
-            adb reboot bootloader
-            fastboot flash boot /tmp/kernel-image
-            fastboot reboot
-            ```
-            
-            ## ⚠️ Important Information
-            
-            **Before Installation:**
-            - ⚠️ Backup current kernel/boot partition
-            - ⚠️ Ensure device is fully charged
-            - ⚠️ Use only on Poco X7 (malachite)
-            - ⚠️ Requires Android 14 based ROM
-            
-            **After Installation:**
-            - ✅ First boot may take 1-2 minutes
-            - ✅ Check system logs if issues occur
-            - ✅ Verify with: `adb shell uname -a`
-            
-            ## 🔐 Verification
-            
-            To verify the download integrity:
-            ```bash
-            # Check SHA256
-            sha256sum Yannnz34u-malachite-*.zip
-            
-            # Compare with provided SHA256 checksum
-            cat Yannnz34u-malachite-*.zip.sha256
-            ```
-            
-            ## 🐛 Support & Bug Reports
-            
-            If you encounter any issues:
-            1. Check kernel logs: `adb logcat -b kernel > kernel.log`
-            2. Get full logcat: `adb logcat > full.log`
-            3. Report on GitHub Issues with:
-               - Device info (ROM, bootloader version)
-               - Full logs and error messages
-               - Steps to reproduce issue
-            
-            ## 📝 Changelog
-            
-            ${{ steps.release_notes.outputs.commit_msg }}
-            
-            **Full Commit History:** [Compare Commits](https://github.com/yannnz34u-maker/yannnproject-/commits/${{ github.ref_name }})
+            1. Download flashable ZIP di bawah.
+            2. Boot into Recovery (TWRP/OrangeFox).
+            3. Install → Select ZIP file → Swipe to confirm.
+            4. Reboot System.
             
             ---
-            
             🎉 **Built with ❤️ using GitHub Actions + KernelSU-Next AnyKernel3**
-            
-            *Last Updated: ${{ needs.prepare.outputs.build_date }}*
           files: |
-            release_artifacts/**/*
+            release_artifacts/*/*.zip
+            release_artifacts/*/*.sha256
+            release_artifacts/*/*.md5
+            release_artifacts/*/Image
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  summary:
-    name: Build Summary
-    runs-on: ubuntu-22.04
-    needs: [prepare, build, package]
-    if: always()
-
-    steps:
-      - name: Generate summary
-        run: |
-          {
-            echo "# ✅ Build Complete"
-            echo ""
-            echo "| Item | Status |"
-            echo "|------|--------|"
-            echo "| Prepare | ${{ needs.prepare.result == 'success' && '✅ Success' || '❌ Failed' }} |"
-            echo "| Build | ${{ needs.build.result == 'success' && '✅ Success' || '❌ Failed' }} |"
-            echo "| Package | ${{ needs.package.result == 'success' && '✅ Success' || '❌ Failed' }} |"
-            echo ""
-            
-            if [ "${{ needs.build.result }}" = "success" ]; then
-              echo "## 📊 Build Artifacts"
-              echo "- Kernel Image: ${{ needs.build.outputs.kernel_image }}"
-              echo "- Size: ${{ needs.build.outputs.image_size }}"
-              echo ""
-              echo "## 🎯 Next Steps"
-              echo "1. Download flashable ZIP from Artifacts"
-              echo "2. Boot into recovery"
-              echo "3. Flash the ZIP file"
-              echo "4. Reboot and enjoy! 🎉"
-            else
-              echo "## ❌ Build Failed"
-              echo "Check workflow logs for detailed error messages"
-            fi
-          } >> $GITHUB_STEP_SUMMARY
