@@ -110,13 +110,25 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-      - name: Clone Clang toolchain
+      - name: Clone Clang toolchain (FIXED)
         run: |
-          echo "📥 Cloning Clang toolchain dari ZyCromerZ..."
-          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
+          echo "📥 Cloning Clang toolchain..."
           
+          # Mengambil Clang versi 17 (cocok untuk Kernel 6.1)
+          git clone --depth=1 -b 17 https://github.com/ZyCromerZ/Clang.git clang
+          
+          # Fallback jika branch 17 gagal atau bin tidak ada
           if [ ! -d "clang/bin" ]; then
-            echo "❌ clang/bin directory missing!"
+            echo "⚠️ Clang ZyCromerZ gagal atau folder bin tidak ditemukan. Mencoba Proton Clang..."
+            rm -rf clang
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          fi
+          
+          # Pengecekan akhir
+          if [ ! -d "clang/bin" ]; then
+            echo "❌ clang/bin directory missing setelah menggunakan fallback!"
+            echo "Isi direktori yang terunduh:"
+            ls -la clang/
             exit 1
           fi
           echo "✅ Clang setup successful"
@@ -158,7 +170,8 @@ jobs:
             LD=ld.lld \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
           IMAGE_PATH="${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
           if [ -f "${IMAGE_PATH}" ]; then
@@ -203,7 +216,7 @@ jobs:
           echo "📥 Cloning KernelSU-Next AnyKernel3..."
           git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git anykernel3
 
-      - name: Configure AnyKernel3 for Malachite
+      - name: Configure AnyKernel3 for Malachite (BOOTABLE FIX)
         run: |
           cd anykernel3
           
@@ -220,15 +233,18 @@ jobs:
             fi
           }
 
-          # Terapkan konfigurasi yang Anda minta
+          # Konfigurasi Wajib untuk Booting (Sesuai Permintaan Anda)
           set_var "block" "boot"
           set_var "is_slot_device" "auto"
           set_var "ramdisk_compression" "auto"
           set_var "patch_vbmeta_flag" "auto"
           set_var "no_magisk_check" "1"
           
+          # Set device name agar TWRP tidak menolak (Error 1)
+          set_var "device.name1" "malachite"
+          
           echo "✅ Konfigurasi anykernel.sh berhasil diperbarui:"
-          grep -E "block=|is_slot_device=|ramdisk_compression=|patch_vbmeta_flag=|no_magisk_check=" anykernel.sh
+          grep -E "block=|is_slot_device=|ramdisk_compression=|patch_vbmeta_flag=|no_magisk_check=|device.name" anykernel.sh
 
       - name: Clean old artifacts & Copy kernel
         run: |
@@ -236,6 +252,7 @@ jobs:
           rm -f Image Image.gz-dtb zImage Image.* 
           rm -rf split_img/ ramdisk/ patch/
           
+          # Salin Image kernel ke root folder AnyKernel3
           cp ../kernel_image/Image .
           echo "✅ Kernel Image copied to AnyKernel3"
 
@@ -248,7 +265,8 @@ jobs:
           ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
           echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
           
-          zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak"
+          # Zip dengan aman mengabaikan file yang tidak perlu
+          zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak" ".git/*" ".github/*"
           
           if [ -f "${ZIP_NAME}" ]; then
             ls -lh "${ZIP_NAME}"
@@ -312,16 +330,12 @@ jobs:
             - Kernel Version: `${{ needs.prepare.outputs.kernel_version }}`
             - Device: **Poco X7 (malachite)**
             - Base: **Android 14 Kernel 6.1**
-            - Commit: `${{ needs.prepare.outputs.commit_hash }}`
             
             ## 📥 Installation Guide
             1. Download flashable ZIP di bawah.
             2. Boot into Recovery (TWRP/OrangeFox).
             3. Install → Select ZIP file → Swipe to confirm.
             4. Reboot System.
-            
-            ---
-            🎉 **Built with ❤️ using GitHub Actions + KernelSU-Next AnyKernel3**
           files: |
             release_artifacts/*/*.zip
             release_artifacts/*/*.sha256
