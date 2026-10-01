@@ -110,16 +110,18 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-      - name: Setup AOSP Clang 17 (GKI Compatible)
+            - name: Setup AOSP Clang 17 (GKI Compatible)
         run: |
           echo "📥 Mendownload AOSP Clang 17 resmi..."
           mkdir -p ${GITHUB_WORKSPACE}/clang
-          # Mengunduh langsung prebuilt clang r487747c (LLVM 17) dari repository Google
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 ${GITHUB_WORKSPACE}/clang-repo
+          cd ${GITHUB_WORKSPACE}/clang
           
-          echo "Memindahkan file biner..."
-          cp -r ${GITHUB_WORKSPACE}/clang-repo/clang-r487747c/* ${GITHUB_WORKSPACE}/clang/
-          rm -rf ${GITHUB_WORKSPACE}/clang-repo
+          # Download langsung versi tar.gz (jauh lebih cepat daripada git clone)
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
+          
+          echo "📦 Mengekstrak Clang..."
+          tar -xf clang-r487747c.tar.gz
+          rm clang-r487747c.tar.gz
           
           if [ ! -d "${GITHUB_WORKSPACE}/clang/bin" ]; then
             echo "❌ Gagal menyiapkan Clang!"
