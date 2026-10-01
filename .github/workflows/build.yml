@@ -50,14 +50,20 @@ jobs:
           BUILD_DATE=$(date '+%Y%m%d')
           BUILD_TIME=$(date '+%H%M')
           COMMIT_HASH=$(git rev-parse --short HEAD)
-          COMMIT_MSG=$(git log -1 --pretty=%B)
+          COMMIT_MSG=$(git log -1 --pretty=%s | cut -c1-50)
+          
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
           echo "build_time=${BUILD_TIME}" >> $GITHUB_OUTPUT
           echo "commit_hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
           echo "commit_msg=${COMMIT_MSG}" >> $GITHUB_OUTPUT
-          echo "Build Date: ${BUILD_DATE}" >> $GITHUB_STEP_SUMMARY
-          echo "Build Time: ${BUILD_TIME}" >> $GITHUB_STEP_SUMMARY
-          echo "Commit: ${COMMIT_HASH}" >> $GITHUB_STEP_SUMMARY
+          
+          {
+            echo "## Build Metadata"
+            echo "- **Date**: ${BUILD_DATE}"
+            echo "- **Time**: ${BUILD_TIME}"
+            echo "- **Commit**: ${COMMIT_HASH}"
+            echo "- **Device**: malachite"
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Install dependencies
         run: |
@@ -92,6 +98,7 @@ jobs:
           export PATH="${CLANG_PATH}:$PATH"
           export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
           
+          echo "🔨 Starting kernel build..."
           make -j$(nproc) O=${{ env.OUT_DIR }} \
             ARCH=${{ env.ARCH }} \
             CC=clang \
@@ -99,16 +106,15 @@ jobs:
             LD=ld.lld \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            2>&1 | tee build.log
+            CROSS_COMPILE=aarch64-linux-gnu-
           
           if [ -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" ]; then
+            IMAGE_SIZE=$(ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image | awk '{print $5}')
             echo "image_path=${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" >> $GITHUB_OUTPUT
-            ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
-            echo "✅ Kernel Image built successfully" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Kernel built successfully!**" >> $GITHUB_STEP_SUMMARY
+            echo "- Size: ${IMAGE_SIZE}" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ Kernel Image not found!" >> $GITHUB_STEP_SUMMARY
-            tail -50 build.log
+            echo "❌ **Kernel build FAILED!**" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
 
@@ -119,19 +125,13 @@ jobs:
           du -sh ${{ env.OUT_DIR }}/
 
       - name: Upload kernel image as artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-image-${{ steps.metadata.outputs.build_date }}
           path: ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
           retention-days: 30
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ steps.metadata.outputs.build_date }}
-          path: build.log
-          retention-days: 7
+          if-no-files-found: error
 
   package:
     name: Package AnyKernel3 ZIP
@@ -236,7 +236,6 @@ jobs:
             ## Artifacts
             - `kernel-image-*`: Raw kernel Image binary
             - `flashable-zip/*.zip`: Ready-to-flash AnyKernel3 ZIP package
-            - `build-log-*`: Build log for debugging
             
             ## Installation
             1. Boot into recovery (TWRP/OrangeFox)
