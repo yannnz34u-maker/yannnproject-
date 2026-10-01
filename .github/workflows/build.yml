@@ -110,25 +110,13 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-      - name: Clone Clang toolchain (FIXED)
+      - name: Clone Clang toolchain
         run: |
-          echo "📥 Cloning Clang toolchain..."
+          echo "📥 Cloning Proton Clang toolchain..."
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           
-          # Mengambil Clang versi 17 (cocok untuk Kernel 6.1)
-          git clone --depth=1 -b 17 https://github.com/ZyCromerZ/Clang.git clang
-          
-          # Fallback jika branch 17 gagal atau bin tidak ada
           if [ ! -d "clang/bin" ]; then
-            echo "⚠️ Clang ZyCromerZ gagal atau folder bin tidak ditemukan. Mencoba Proton Clang..."
-            rm -rf clang
-            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          fi
-          
-          # Pengecekan akhir
-          if [ ! -d "clang/bin" ]; then
-            echo "❌ clang/bin directory missing setelah menggunakan fallback!"
-            echo "Isi direktori yang terunduh:"
-            ls -la clang/
+            echo "❌ clang/bin directory missing!"
             exit 1
           fi
           echo "✅ Clang setup successful"
@@ -222,7 +210,7 @@ jobs:
           
           echo "⚙️ Mengonfigurasi anykernel.sh..."
           
-          # Fungsi bash untuk update variabel (replace jika ada, append jika tidak)
+          # Fungsi bash untuk update variabel
           set_var() {
             local key=$1
             local value=$2
@@ -233,14 +221,14 @@ jobs:
             fi
           }
 
-          # Konfigurasi Wajib untuk Booting (Sesuai Permintaan Anda)
+          # Konfigurasi Wajib
           set_var "block" "boot"
           set_var "is_slot_device" "auto"
           set_var "ramdisk_compression" "auto"
           set_var "patch_vbmeta_flag" "auto"
           set_var "no_magisk_check" "1"
           
-          # Set device name agar TWRP tidak menolak (Error 1)
+          # Set device name agar TWRP tidak menolak
           set_var "device.name1" "malachite"
           
           echo "✅ Konfigurasi anykernel.sh berhasil diperbarui:"
@@ -265,7 +253,7 @@ jobs:
           ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
           echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
           
-          # Zip dengan aman mengabaikan file yang tidak perlu
+          # Zip dengan aman
           zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak" ".git/*" ".github/*"
           
           if [ -f "${ZIP_NAME}" ]; then
