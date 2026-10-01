@@ -108,13 +108,82 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-      - name: Clone Clang toolchain
+      - name: Clone Clang toolchain (dengan retry)
         run: |
-          echo "📥 Cloning Clang toolchain..."
-          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
-          export CLANG_PATH="${PWD}/clang/bin"
+          echo "📥 Cloning Clang toolchain dari ZyCromerZ..."
+          
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          CLONE_SUCCESS=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang 2>&1; then
+              echo "✅ Clang repository cloned successfully"
+              CLONE_SUCCESS=1
+              break
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "⚠️ Clone attempt $RETRY_COUNT failed"
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "Retrying in 10 seconds..."
+                rm -rf clang 2>/dev/null
+                sleep 10
+              fi
+            fi
+          done
+          
+          if [ $CLONE_SUCCESS -ne 1 ]; then
+            echo "❌ Failed to clone after $MAX_RETRIES attempts"
+            echo "Trying alternative approach..."
+            exit 1
+          fi
+          
+          # Verify clone succeeded
+          if [ ! -d "clang" ]; then
+            echo "❌ clang directory not created"
+            exit 1
+          fi
+          
+          # List clang contents
+          echo ""
+          echo "📋 Clang directory structure:"
+          ls -lah clang/ | head -15
+          
+          # Verify bin directory
+          if [ ! -d "clang/bin" ]; then
+            echo "❌ clang/bin directory missing!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ Clang setup successful"
+
+      - name: Verify & test Clang
+        run: |
+          export CLANG_PATH="${GITHUB_WORKSPACE}/clang/bin"
+          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
+          
+          echo "🔍 Verifying Clang binary..."
+          
+          # Check binary exists
+          if [ ! -f "${CLANG_PATH}/clang" ]; then
+            echo "❌ clang binary not found at ${CLANG_PATH}/clang"
+            echo "Directory contents:"
+            ls -la "${CLANG_PATH}/" | head -20
+            exit 1
+          fi
+          
+          # Test binary
+          echo "🧪 Testing Clang..."
           ${CLANG_PATH}/clang --version
-          echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Clang verified & working"
+            echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
+          else
+            echo "❌ Clang test failed (exit code: $?)"
+            exit 1
+          fi
 
       - name: Build with Make
         id: build
