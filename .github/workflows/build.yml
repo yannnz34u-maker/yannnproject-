@@ -75,7 +75,7 @@ jobs:
             echo "| **Build Date** | ${BUILD_DATE} |"
             echo "| **Build Time** | ${BUILD_TIME} |"
             echo "| **Commit** | ${COMMIT_HASH} |"
-            echo "| **Device** | ${{ env.DEVICE }} |"
+            echo "| **Device** | ${{ env.DEVICE }} (GKI) |"
             echo "| **Kernel Version** | ${KERNEL_VERSION} |"
             echo "| **Branch** | android14-6.1 |"
           } >> $GITHUB_STEP_SUMMARY
@@ -147,8 +147,8 @@ jobs:
           echo "🔨 Starting kernel build (Make)..."
           mkdir -p ${{ env.OUT_DIR }}
           
-          echo "⚙️ Configuring kernel..."
-          make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} ${{ env.DEVICE }}_defconfig
+          echo "⚙️ Configuring kernel (GKI)..."
+          make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} gki_defconfig
           
           echo "🚀 Building kernel image..."
           time make -j$(nproc) O=${{ env.OUT_DIR }} \
@@ -311,13 +311,13 @@ jobs:
           tag_name: ${{ github.event.inputs.release_tag }}
           generate_release_notes: true
           body: |
-            # 🔥 Yannnz34u Kernel - ${{ github.event.inputs.release_tag }}
+            # 🔥 Yannnz34u Kernel (GKI) - ${{ github.event.inputs.release_tag }}
             
             **Build Information:**
             - Build Date: `${{ needs.prepare.outputs.build_date }}`
             - Kernel Version: `${{ needs.prepare.outputs.kernel_version }}`
             - Device: **Poco X7 (malachite)**
-            - Base: **Android 14 Kernel 6.1**
+            - Base: **Android 14 Kernel 6.1 GKI**
             
             ## 📥 Installation Guide
             1. Download flashable ZIP di bawah.
