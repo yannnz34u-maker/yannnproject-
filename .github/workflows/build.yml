@@ -46,6 +46,8 @@ jobs:
 
       REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
 
+      NEUTRON_URL: "https://github.com/USERNAME/REPO/releases/download/TAG/neutron-clang.tar.zst"
+
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
@@ -62,9 +64,18 @@ jobs:
             git curl wget unzip zip rsync bc bison flex cpio \
             build-essential libssl-dev libelf-dev pahole \
             python3 python-is-python3 xz-utils zstd lz4 \
-            clang lld llvm \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Download Neutron Clang
+        run: |
+          mkdir -p clang
+          wget -O /tmp/neutron.tar.zst "${NEUTRON_URL}"
+          tar --use-compress-program=unzstd -xf /tmp/neutron.tar.zst -C clang --strip-components=1
+
+      - name: Export Neutron to PATH
+        run: |
+          echo "${GITHUB_WORKSPACE}/clang/bin" >> $GITHUB_PATH
 
       - name: Show tool versions
         run: |
