@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       neutron_url:
-        description: "Direct download URL Neutron Clang release asset (.tar.zst/.tar.gz/.tar.xz)"
+        description: "Direct download URL Neutron Clang release asset (.tar.zst/.tar.gz/.tar.xz/.zip)"
         required: true
         default: ""
         type: string
@@ -83,16 +83,12 @@ jobs:
         run: |
           mkdir -p clang
           cd /tmp
-
           URL="${{ github.event.inputs.neutron_url }}"
           FILE="neutron.pkg"
-
           echo "Downloading: $URL"
           wget -O "$FILE" "$URL"
-
           MIME=$(file -b "$FILE")
           echo "Downloaded file type: $MIME"
-
           case "$URL" in
             *.tar.zst|*.tzst)
               tar --use-compress-program=unzstd -xf "$FILE" -C "${GITHUB_WORKSPACE}/clang" --strip-components=1
@@ -218,11 +214,10 @@ jobs:
       - name: Build AnyKernel3 zip
         if: ${{ github.event.inputs.build_anykernel == 'true' }}
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git AnyKernel3
           cp "${{ steps.detect.outputs.image }}" AnyKernel3/Image
 
           mkdir -p AnyKernel3/feature
-
           if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ] && [ -d /tmp/feature_pack/rekernel ]; then
             mkdir -p AnyKernel3/feature/rekernel
             cp -a /tmp/feature_pack/rekernel/. AnyKernel3/feature/rekernel/ || true
@@ -257,10 +252,10 @@ jobs:
 
           . tools/ak3-core.sh
 
-          kernel_version=$(cat /proc/version | awk -F '-' '{print $1}' | awk '{print $3}')
+          kernel_version=$(uname -r)
           case $kernel_version in
-              5.10*|5.15*|6.1*|6.6*) gki_supported=true ;;
-              *) gki_supported=false ;;
+            5.10*|5.15*|6.1*|6.6*) gki_supported=true ;;
+            *) gki_supported=false ;;
           esac
 
           ui_print " "
@@ -270,18 +265,12 @@ jobs:
           ui_print " "
           ui_print "  -> Kernel   : Yannnz34u"
           ui_print "  -> Device   : malachite / malachite_global"
+          ui_print "  -> Target   : boot"
           ui_print " "
 
           $gki_supported || abort "  -> Non-GKI device, abort."
 
-          split_boot
-
-          if [ -f "$SPLITIMG/ramdisk.cpio" ]; then
-              unpack_ramdisk
-              write_boot
-          else
-              flash_boot
-          fi
+          flash_boot
 
           ui_print " "
           ui_print "  -> Yannnzkernel flashed successfully"
@@ -289,11 +278,9 @@ jobs:
           EOF
 
           ZIP_NAME="Yannnz34u-${DEVICE_CODENAME}-$(date +%Y%m%d-%H%M).zip"
-
           cd AnyKernel3
           zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
           cd ..
-
           echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
       - name: Upload AnyKernel3 zip
