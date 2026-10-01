@@ -1,5 +1,4 @@
 name: Build Yannnz34u Kernel - Malachite
-
 on:
   workflow_dispatch:
     inputs:
@@ -19,8 +18,8 @@ on:
     branches:
       - android14-6.1
     paths:
-      - 'arch/**'
-      - 'kernel/**'
+      - 'arch/'
+      - 'kernel/'
       - 'build.config.*'
       - '.github/workflows/build.yml'
   pull_request:
@@ -60,7 +59,7 @@ jobs:
           BUILD_DATE=$(date '+%Y%m%d')
           BUILD_TIME=$(date '+%H%M')
           COMMIT_HASH=$(git rev-parse --short HEAD)
-          KERNEL_VERSION=$(grep -m 1 '^VERSION = ' Makefile | awk '{print $3}' || echo "6.1")
+          KERNEL_VERSION=$(grep -m 1 '^VERSION = ' Makefile | awk '{print $3}'  echo "6.1")
           
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
           echo "build_time=${BUILD_TIME}" >> $GITHUB_OUTPUT
@@ -72,12 +71,12 @@ jobs:
             echo ""
             echo "| Property | Value |"
             echo "|----------|-------|"
-            echo "| **Build Date** | ${BUILD_DATE} |"
-            echo "| **Build Time** | ${BUILD_TIME} |"
-            echo "| **Commit** | ${COMMIT_HASH} |"
-            echo "| **Device** | ${{ env.DEVICE }} (GKI) |"
-            echo "| **Kernel Version** | ${KERNEL_VERSION} |"
-            echo "| **Branch** | android14-6.1 |"
+            echo "| Build Date | ${BUILD_DATE} |"
+            echo "| Build Time | ${BUILD_TIME} |"
+            echo "| Commit | ${COMMIT_HASH} |"
+            echo "| Device | ${{ env.DEVICE }} (GKI) |"
+            echo "| Kernel Version | ${KERNEL_VERSION} |"
+            echo "| Branch | android14-6.1 |"
           } >> $GITHUB_STEP_SUMMARY
 
   build:
@@ -110,13 +109,12 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-            - name: Setup AOSP Clang 17 (GKI Compatible)
+      - name: Setup AOSP Clang 17 (GKI Compatible)
         run: |
           echo "📥 Mendownload AOSP Clang 17 resmi..."
           mkdir -p ${GITHUB_WORKSPACE}/clang
           cd ${GITHUB_WORKSPACE}/clang
           
-          # Download langsung versi tar.gz (jauh lebih cepat daripada git clone)
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
           
           echo "📦 Mengekstrak Clang..."
@@ -135,7 +133,9 @@ jobs:
           
           echo "🔍 Verifying Clang binary..."
           ${CLANG_PATH}/clang --version
-          
+
+Yannz_#AFK, [10/1/26, 19:03]
+
           if [ $? -eq 0 ]; then
             echo "✅ Clang verified & working"
             echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
@@ -175,7 +175,7 @@ jobs:
             echo "image_path=${IMAGE_PATH}" >> $GITHUB_OUTPUT
             echo "image_size=${IMAGE_SIZE}" >> $GITHUB_OUTPUT
             
-            echo "✅ **Kernel build SUCCESS**" >> $GITHUB_STEP_SUMMARY
+            echo "✅ Kernel build SUCCESS" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ Kernel Image not found!" >> $GITHUB_STEP_SUMMARY
             exit 1
@@ -249,14 +249,15 @@ jobs:
         run: |
           cd anykernel3
           chmod +x anykernel.sh
-          chmod -R +x tools/ 2>/dev/null || true
+          chmod -R +x tools/ 2>/dev/null  true
           
           ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-GKI-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
           echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
           
           zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak" ".git/*" ".github/*"
-          
-          if [ -f "${ZIP_NAME}" ]; then
+
+Yannz_#AFK, [10/1/26, 19:03]
+if [ -f "${ZIP_NAME}" ]; then
             echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           else
             echo "❌ ZIP creation failed!"
@@ -311,11 +312,11 @@ jobs:
           body: |
             # 🔥 Yannnz34u Kernel (GKI) - ${{ github.event.inputs.release_tag }}
             
-            **Build Information:**
-            - Build Date: `${{ needs.prepare.outputs.build_date }}`
-            - Kernel Version: `${{ needs.prepare.outputs.kernel_version }}`
-            - Device: **Poco X7 (malachite)**
-            - Base: **Android 14 Kernel 6.1 GKI**
+            Build Information:
+            - Build Date: ${{ needs.prepare.outputs.build_date }}
+            - Kernel Version: ${{ needs.prepare.outputs.kernel_version }}
+            - Device: Poco X7 (malachite)
+            - Base: Android 14 Kernel 6.1 GKI
             
             ## 📥 Installation Guide
             1. Download flashable ZIP di bawah.
