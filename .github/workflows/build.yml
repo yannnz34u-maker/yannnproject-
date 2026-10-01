@@ -1,56 +1,271 @@
-name: Build Android Kernel
+name: Build Android Kernel with AnyKernel3
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: false
+        default: ''
   push:
     branches:
       - main
       - master
+      - android14-6.1
+    paths:
+      - 'kernel/**'
+      - 'arch/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches:
+      - main
+      - master
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  DEVICE: malachite
+  KERNEL_NAME: Yannnz34u
+  OUT_DIR: out
+  CLANG_VERSION: latest
 
 jobs:
   build:
+    name: Build Kernel
     runs-on: ubuntu-22.04
+    outputs:
+      kernel_image: ${{ steps.build.outputs.image_path }}
+      build_date: ${{ steps.metadata.outputs.build_date }}
+      build_time: ${{ steps.metadata.outputs.build_time }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate metadata
+        id: metadata
+        run: |
+          BUILD_DATE=$(date '+%Y%m%d')
+          BUILD_TIME=$(date '+%H%M')
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+          echo "build_time=${BUILD_TIME}" >> $GITHUB_OUTPUT
+          echo "commit_hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
+          echo "commit_msg=${COMMIT_MSG}" >> $GITHUB_OUTPUT
+          echo "Build Date: ${BUILD_DATE}" >> $GITHUB_STEP_SUMMARY
+          echo "Build Time: ${BUILD_TIME}" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: ${COMMIT_HASH}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git curl wget zip unzip bc bison flex make \
+            ninja-build gcc g++ clang lld llvm \
+            libssl-dev build-essential python3 cpio rsync \
+            device-tree-compiler libfdt-dev u-boot-tools
+
+      - name: Clone Clang toolchain
+        run: |
+          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
+          ls -lah clang/bin/ | head -20
+
+      - name: Prepare toolchain
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
+          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
+          clang --version
+          echo "CLANG_PATH=${GITHUB_WORKSPACE}/clang/bin" >> $GITHUB_ENV
+
+      - name: Configure kernel
+        run: |
+          mkdir -p ${{ env.OUT_DIR }}
+          make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} ${DEVICE}_defconfig
+          echo "✅ Kernel configured for ${DEVICE}"
+
+      - name: Build kernel image
+        id: build
+        run: |
+          export PATH="${CLANG_PATH}:$PATH"
+          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
+          
+          make -j$(nproc) O=${{ env.OUT_DIR }} \
+            ARCH=${{ env.ARCH }} \
+            CC=clang \
+            CXX=clang++ \
+            LD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            2>&1 | tee build.log
+          
+          if [ -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" ]; then
+            echo "image_path=${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" >> $GITHUB_OUTPUT
+            ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
+            echo "✅ Kernel Image built successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Kernel Image not found!" >> $GITHUB_STEP_SUMMARY
+            tail -50 build.log
+            exit 1
+          fi
+
+      - name: Verify build artifacts
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/
+          du -sh ${{ env.OUT_DIR }}/
+
+      - name: Upload kernel image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image-${{ steps.metadata.outputs.build_date }}
+          path: ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.metadata.outputs.build_date }}
+          path: build.log
+          retention-days: 7
+
+  package:
+    name: Package AnyKernel3 ZIP
+    needs: build
+    runs-on: ubuntu-22.04
+    if: success()
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            git curl wget zip unzip bc bison flex make ninja-build \
-            gcc g++ clang lld llvm libssl-dev build-essential \
-            python3 cpio rsync
+      - name: Download kernel image
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-image-${{ needs.build.outputs.build_date }}
+          path: kernel_image/
 
-      - name: Set up build environment
+      - name: Verify AnyKernel3
         run: |
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          if [ ! -d "anykernel3" ]; then
+            echo "❌ AnyKernel3 directory not found!"
+            echo "Please ensure anykernel3/ directory exists in the repo"
+            ls -la
+            exit 1
+          fi
+          ls -lah anykernel3/
 
-      - name: Clone clang
+      - name: Clean AnyKernel3 directory
         run: |
-          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git clang
+          cd anykernel3
+          # Remove old kernel
+          rm -f Image Image.gz-dtb zImage
+          rm -rf split_img/
+          rm -rf ramdisk/
+          echo "✅ AnyKernel3 cleaned"
 
-      - name: Prepare toolchain path
+      - name: Copy kernel to AnyKernel3
         run: |
-          echo "${GITHUB_WORKSPACE}/clang/bin" >> $GITHUB_PATH
+          cp kernel_image/Image anykernel3/
+          ls -lh anykernel3/Image
 
-      - name: Configure kernel
+      - name: Create flashable ZIP
         run: |
-          make O=out ARCH=arm64 malachite_defconfig
+          cd anykernel3
+          
+          # Ensure proper permissions
+          chmod +x anykernel.sh
+          chmod +x tools/*
+          
+          # Create ZIP with proper structure
+          zip -r9 "${KERNEL_NAME}-${DEVICE}-$(date +%Y%m%d-%H%M).zip" \
+            anykernel.sh \
+            tools/ \
+            META-INF/ \
+            Image \
+            LICENSE \
+            common/ 2>&1 | head -50
+          
+          ls -lh *.zip
 
-      - name: Build kernel
+      - name: Generate ZIP hash
         run: |
-          make -j$(nproc) O=out \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            LLVM=1 \
-            LLVM_IAS=1
+          cd anykernel3
+          ZIP_FILE=$(ls -t *.zip | head -1)
+          echo "ZIP_FILE=${ZIP_FILE}" >> $GITHUB_ENV
+          sha256sum "${ZIP_FILE}" > "${ZIP_FILE}.sha256"
+          cat "${ZIP_FILE}.sha256"
 
-      - name: Upload Image
+      - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
-          path: out/arch/arm64/boot/Image
+          name: flashable-zip
+          path: anykernel3/*.zip*
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: [build, package]
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          body: |
+            # ${{ env.KERNEL_NAME }} Kernel Build
+            
+            **Build Date:** ${{ needs.build.outputs.build_date }}
+            **Build Time:** ${{ needs.build.outputs.build_time }}
+            **Device:** ${{ env.DEVICE }}
+            
+            ## Artifacts
+            - `kernel-image-*`: Raw kernel Image binary
+            - `flashable-zip/*.zip`: Ready-to-flash AnyKernel3 ZIP package
+            - `build-log-*`: Build log for debugging
+            
+            ## Installation
+            1. Boot into recovery (TWRP/OrangeFox)
+            2. Flash the `.zip` file
+            3. Reboot system
+            
+            ## Changelog
+            See commit history for changes.
+          files: |
+            artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    name: Build Notification
+    needs: [build, package]
+    runs-on: ubuntu-22.04
+    if: always()
+
+    steps:
+      - name: Build Status Summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel Build:** ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package Creation:** ${{ needs.package.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.package.result }}" = "success" ]; then
+            echo "✅ Build completed successfully!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Build failed! Check logs above." >> $GITHUB_STEP_SUMMARY
+          fi
