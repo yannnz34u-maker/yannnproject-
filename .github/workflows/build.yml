@@ -110,21 +110,26 @@ jobs:
             device-tree-compiler libfdt-dev u-boot-tools \
             openjdk-11-jdk-headless
 
-      - name: Clone Clang toolchain
+      - name: Setup AOSP Clang 17 (GKI Compatible)
         run: |
-          echo "📥 Cloning Proton Clang toolchain..."
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          echo "📥 Mendownload AOSP Clang 17 resmi..."
+          mkdir -p ${GITHUB_WORKSPACE}/clang
+          # Mengunduh langsung prebuilt clang r487747c (LLVM 17) dari repository Google
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 ${GITHUB_WORKSPACE}/clang-repo
           
-          if [ ! -d "clang/bin" ]; then
-            echo "❌ clang/bin directory missing!"
+          echo "Memindahkan file biner..."
+          cp -r ${GITHUB_WORKSPACE}/clang-repo/clang-r487747c/* ${GITHUB_WORKSPACE}/clang/
+          rm -rf ${GITHUB_WORKSPACE}/clang-repo
+          
+          if [ ! -d "${GITHUB_WORKSPACE}/clang/bin" ]; then
+            echo "❌ Gagal menyiapkan Clang!"
             exit 1
           fi
-          echo "✅ Clang setup successful"
+          echo "✅ AOSP Clang 17 siap digunakan."
 
       - name: Verify & test Clang
         run: |
           export CLANG_PATH="${GITHUB_WORKSPACE}/clang/bin"
-          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
           
           echo "🔍 Verifying Clang binary..."
           ${CLANG_PATH}/clang --version
@@ -137,17 +142,17 @@ jobs:
             exit 1
           fi
 
-      - name: Build with Make
+      - name: Build with Make (GKI)
         id: build
         if: github.event.inputs.build_method != 'bazel'
         run: |
           export PATH="${CLANG_PATH}:$PATH"
-          export LD_LIBRARY_PATH="${CLANG_PATH}/../lib:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/clang/lib:$LD_LIBRARY_PATH"
           
           echo "🔨 Starting kernel build (Make)..."
           mkdir -p ${{ env.OUT_DIR }}
           
-          echo "⚙️ Configuring kernel (GKI)..."
+          echo "⚙️ Configuring GKI kernel..."
           make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} gki_defconfig
           
           echo "🚀 Building kernel image..."
@@ -204,13 +209,12 @@ jobs:
           echo "📥 Cloning KernelSU-Next AnyKernel3..."
           git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git anykernel3
 
-      - name: Configure AnyKernel3 for Malachite (BOOTABLE FIX)
+      - name: Configure AnyKernel3 for Malachite
         run: |
           cd anykernel3
           
           echo "⚙️ Mengonfigurasi anykernel.sh..."
           
-          # Fungsi bash untuk update variabel
           set_var() {
             local key=$1
             local value=$2
@@ -221,18 +225,14 @@ jobs:
             fi
           }
 
-          # Konfigurasi Wajib
           set_var "block" "boot"
           set_var "is_slot_device" "auto"
           set_var "ramdisk_compression" "auto"
           set_var "patch_vbmeta_flag" "auto"
           set_var "no_magisk_check" "1"
-          
-          # Set device name agar TWRP tidak menolak
           set_var "device.name1" "malachite"
           
-          echo "✅ Konfigurasi anykernel.sh berhasil diperbarui:"
-          grep -E "block=|is_slot_device=|ramdisk_compression=|patch_vbmeta_flag=|no_magisk_check=|device.name" anykernel.sh
+          echo "✅ Konfigurasi anykernel.sh berhasil diperbarui."
 
       - name: Clean old artifacts & Copy kernel
         run: |
@@ -240,7 +240,6 @@ jobs:
           rm -f Image Image.gz-dtb zImage Image.* 
           rm -rf split_img/ ramdisk/ patch/
           
-          # Salin Image kernel ke root folder AnyKernel3
           cp ../kernel_image/Image .
           echo "✅ Kernel Image copied to AnyKernel3"
 
@@ -250,14 +249,12 @@ jobs:
           chmod +x anykernel.sh
           chmod -R +x tools/ 2>/dev/null || true
           
-          ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
+          ZIP_NAME="${{ env.KERNEL_NAME }}-malachite-GKI-${{ needs.prepare.outputs.build_date }}-${{ needs.prepare.outputs.build_time }}.zip"
           echo "📦 Creating flashable ZIP: ${ZIP_NAME}"
           
-          # Zip dengan aman
           zip -r9 "${ZIP_NAME}" . -x "${ZIP_NAME}" "*.md5" "*.sha256" "*.bak" ".git/*" ".github/*"
           
           if [ -f "${ZIP_NAME}" ]; then
-            ls -lh "${ZIP_NAME}"
             echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           else
             echo "❌ ZIP creation failed!"
@@ -269,7 +266,6 @@ jobs:
           cd anykernel3
           sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
           md5sum "${ZIP_NAME}" > "${ZIP_NAME}.md5"
-          echo "✅ Checksums generated"
 
       - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
@@ -330,4 +326,4 @@ jobs:
             release_artifacts/*/*.md5
             release_artifacts/*/Image
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.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 }}
