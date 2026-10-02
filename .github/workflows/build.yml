@@ -1,4 +1,4 @@
-name: Build GKI Kernel + Bypass (Robust)
+name: Build GKI Kernel + Bypass
 
 on:
   push:
@@ -9,10 +9,6 @@ on:
         description: 'Kernel branch'
         required: false
         default: 'android14-6.6'
-      device_codename:
-        description: 'Device codename'
-        required: false
-        default: 'malachite'
 
 jobs:
   build:
@@ -21,82 +17,55 @@ jobs:
       contents: write
     
     steps:
-      # ========================================
-      # PREPARE
-      # ========================================
-      
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup environment variables
+      - name: Setup
         run: |
           KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'android14-6.6' }}"
-          DEVICE="${{ github.event.inputs.device_codename || 'malachite' }}"
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           
           echo "KERNEL_BRANCH=$KERNEL_BRANCH" >> $GITHUB_ENV
-          echo "DEVICE=$DEVICE" >> $GITHUB_ENV
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           echo "BUILD_DIR=/tmp/gki-build" >> $GITHUB_ENV
           echo "KERNEL_DIR=/tmp/gki-build/kernel" >> $GITHUB_ENV
           echo "AK3_DIR=/tmp/gki-build/ak3" >> $GITHUB_ENV
 
-      - name: Free up disk space
+      - name: Free disk space
         run: |
-          echo "Freeing up disk space..."
           sudo rm -rf /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           sudo apt-get clean && sudo apt-get autoclean
-          df -h
-          echo "✓ Disk space freed"
+          df -h | grep -E "^/dev|Filesystem"
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
-          echo "Installing dependencies..."
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            build-essential libssl-dev libelf-dev \
-            bison flex bc u-boot-tools cpio pahole \
-            wget curl git python3-pip zip unzip \
-            ca-certificates 2>&1 | grep -i "done\|installed" || echo "✓ Dependencies installed"
+          sudo apt-get install -y -qq build-essential libssl-dev libelf-dev bison flex bc u-boot-tools cpio pahole wget curl git python3-pip zip unzip
+          echo "Dependencies installed"
 
-      # ========================================
-      # BUILD KERNEL
-      # ========================================
-
-      - name: Create build directory
+      - name: Create directories
         run: |
-          mkdir -p $BUILD_DIR
+          mkdir -p $BUILD_DIR $KERNEL_DIR $AK3_DIR
           ls -lh /tmp | grep gki
-          echo "✓ Build directory created"
 
-      - name: Clone AOSP GKI Kernel
+      - name: Clone kernel (with retry)
         run: |
           cd $BUILD_DIR
-          echo "Cloning kernel: $KERNEL_BRANCH"
-          
-          # Retry logic untuk clone
           MAX_ATTEMPTS=3
           ATTEMPT=1
           
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            echo "Clone attempt $ATTEMPT/$MAX_ATTEMPTS..."
             
-            if git clone https://android.googlesource.com/kernel/common \
-              --depth=1 -b $KERNEL_BRANCH kernel 2>&1 | tee clone.log; then
-              echo "✓ Kernel cloned successfully"
+            if git clone https://android.googlesource.com/kernel/common --depth=1 -b $KERNEL_BRANCH kernel 2>&1 | head -20; then
+              echo "Clone successful"
               break
             else
-              echo "❌ Clone failed on attempt $ATTEMPT"
-              
               if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-                WAIT=$((ATTEMPT * 10))
-                echo "Waiting ${WAIT}s before retry..."
-                sleep $WAIT
+                echo "Clone failed, retrying in 10s..."
+                sleep 10
               else
-                echo "❌ Clone failed after $MAX_ATTEMPTS attempts"
-                cat clone.log
+                echo "Clone failed after $MAX_ATTEMPTS attempts"
                 exit 1
               fi
             fi
@@ -104,27 +73,8 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
           done
           
-          cd $KERNEL_DIR
-          echo "Kernel info:"
-          git log --oneline -3 2>/dev/null || echo "⚠ Git log unavailable"
-
-      - name: Prepare kernel build
-        run: |
-          cd $KERNEL_DIR
-          
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          echo "Cleaning previous builds..."
-          make clean > /dev/null 2>&1 || true
-          make mrproper > /dev/null 2>&1 || true
-          
-          echo "Loading GKI defconfig..."
-          if ! make gki_defconfig 2>&1 | tail -5; then
-            echo "⚠ Warning: gki_defconfig might have issues"
-          fi
-          
-          echo "✓ Kernel prepared"
+          cd kernel
+          echo "Kernel cloned"
 
       - name: Build kernel
         run: |
@@ -133,65 +83,52 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          echo "Building kernel with $(nproc) jobs..."
+          echo "Cleaning..."
+          make clean > /dev/null 2>&1 || true
           
-          # Build dengan timeout & capture error
-          if ! timeout 120m make -j$(nproc) 2>&1 | tee build.log; then
-            echo "❌ Kernel build FAILED"
-            echo "Last 50 lines of build log:"
-            tail -50 build.log
+          echo "Config..."
+          make gki_defconfig > /dev/null 2>&1 || true
+          
+          echo "Building (timeout 120m)..."
+          if ! timeout 120m make -j$(nproc) 2>&1 | tail -20; then
+            echo "Build failed"
             exit 1
           fi
           
-          # Verify output
           if [ ! -f arch/arm64/boot/Image ]; then
-            echo "❌ Kernel Image not generated!"
-            tail -50 build.log
+            echo "Image not found"
             exit 1
           fi
           
-          KERNEL_SIZE=$(ls -lh arch/arm64/boot/Image | awk '{print $5}')
-          echo "✓ Kernel built: $KERNEL_SIZE"
+          SIZE=$(ls -lh arch/arm64/boot/Image | awk '{print $5}')
+          echo "Kernel built: $SIZE"
           
           cp arch/arm64/boot/Image $BUILD_DIR/Image
-          ls -lh $BUILD_DIR/Image
 
-      # ========================================
-      # PREPARE ANYKERNEL3
-      # ========================================
-
-      - name: Download AnyKernel3
+      - name: Setup AnyKernel3
         run: |
           cd $BUILD_DIR
           
           echo "Cloning AnyKernel3..."
-          if ! git clone https://github.com/osm0sis/AnyKernel3.git ak3 2>&1 | head -10; then
-            echo "❌ AnyKernel3 clone failed!"
-            exit 1
-          fi
+          git clone https://github.com/osm0sis/AnyKernel3.git ak3
           
-          cd ak3
-          echo "✓ AnyKernel3 ready"
-          ls -lh
+          echo "AnyKernel3 ready"
 
-      - name: Create bypass anykernel.sh
+      - name: Create anykernel.sh (bypass mode)
         run: |
           SCRIPT=$AK3_DIR/anykernel.sh
-          
-          # Backup
-          cp $SCRIPT $SCRIPT.backup
+          cp $SCRIPT $SCRIPT.bak
           
           cat > $SCRIPT << 'ANYKERNEL_SCRIPT'
-## AnyKernel3 - GKI Bypass Mode
+## AnyKernel3 - GKI Bypass
 
 properties() {
-kernel.string=GKI Bypass - Poco X7
+kernel.string=GKI Bypass
 do.devicecheck=1
 do.modules=0
 do.systemless=0
 do.cleanup=1
 do.cleanuponabort=0
-do.check_boot_version=0
 device.name1=malachite
 device.name2=malachite_global
 }
@@ -205,21 +142,13 @@ no_magisk_check=1
 . tools/ak3-core.sh
 
 ui_print " "
-ui_print "GKI Kernel (Bypass Mode)"
+ui_print "GKI Kernel (Bypass)"
 ui_print " "
 
-# Device check
 DEVICE=$(getprop ro.product.device)
 if [ "$DEVICE" != "malachite" ] && [ "$DEVICE" != "malachite_global" ]; then
-  BUILD_DEVICE=$(getprop ro.build.product)
-  if [ "$BUILD_DEVICE" != "malachite" ] && [ "$BUILD_DEVICE" != "malachite_global" ]; then
-    abort "Device tidak compatible: $DEVICE"
-  fi
+  abort "Device not compatible"
 fi
-
-ui_print "Device: $DEVICE"
-ui_print "Mode: BYPASS"
-ui_print " "
 
 MODPATH=${0%/*}
 bin=$MODPATH/tools
@@ -228,7 +157,6 @@ split_img=$MODPATH/split_img
 
 mkdir -p $split_img
 
-# Find boot partition
 BOOT_PARTITION=""
 if [ -b /dev/block/by-name/boot_a ]; then
   BOOT_PARTITION="/dev/block/by-name/boot_a"
@@ -238,121 +166,93 @@ else
   abort "Boot partition not found"
 fi
 
-ui_print "Boot: $BOOT_PARTITION"
-ui_print " "
-
-# Dump
-ui_print "Dumping boot..."
+ui_print "Dumping..."
 dd if=$BOOT_PARTITION of=$bootimg bs=1M conv=notrunc,noerror 2>/dev/null || abort "Dump failed"
-ui_print "  $(ls -lh $bootimg | awk '{print $5}')"
-ui_print " "
 
-# Extract
 ui_print "Extracting..."
 cd $split_img
 $bin/magiskboot unpack $bootimg > /dev/null 2>&1 || true
-ui_print "  Done"
-ui_print " "
 
-# Inject kernel
 ui_print "Injecting kernel..."
 if [ ! -f "$MODPATH/Image" ]; then
-  abort "Kernel image not found"
+  abort "Kernel not found"
 fi
 cp $MODPATH/Image kernel
-ui_print "  $(ls -lh kernel | awk '{print $5}')"
-ui_print " "
 
-# Repack
 ui_print "Repacking..."
 $bin/magiskboot repack $bootimg > /dev/null 2>&1
 if [ ! -f new-boot.img ]; then
   abort "Repack failed"
 fi
-ui_print "  $(ls -lh new-boot.img | awk '{print $5}')"
-ui_print " "
 
-# Flash
 ui_print "Flashing..."
 dd if=new-boot.img of=$BOOT_PARTITION bs=1M conv=notrunc 2>/dev/null || abort "Flash failed"
-ui_print "  OK"
-ui_print " "
 
-# Cleanup
 cd /
 rm -rf $split_img $bootimg 2>/dev/null
 
-ui_print "✓ Flash Complete!"
+ui_print " "
+ui_print "Done! ✓"
 ui_print " "
 
 ANYKERNEL_SCRIPT
           
           chmod +x $SCRIPT
-          echo "✓ anykernel.sh created"
+          echo "anykernel.sh created"
 
-      - name: Copy kernel to AnyKernel3
+      - name: Copy kernel
         run: |
           cp $BUILD_DIR/Image $AK3_DIR/
           
-          # Verify
           if [ ! -f "$AK3_DIR/Image" ]; then
-            echo "❌ Kernel copy failed!"
+            echo "Kernel copy failed"
             exit 1
           fi
           
-          # Check file type
-          FILE_TYPE=$(file $AK3_DIR/Image | grep -i kernel || echo "unknown")
-          echo "Kernel type: $FILE_TYPE"
-          echo "✓ Kernel copied"
+          SIZE=$(ls -lh $AK3_DIR/Image | awk '{print $5}')
+          echo "Kernel ready: $SIZE"
 
-      - name: Verify AnyKernel3
+      - name: Verify files
         run: |
-          echo "Verifying AnyKernel3 structure..."
+          echo "Checking required files..."
           
-          REQUIRED_FILES=("anykernel.sh" "Image" "tools/ak3-core.sh" "tools/magiskboot")
+          FILES=(
+            "$AK3_DIR/anykernel.sh"
+            "$AK3_DIR/Image"
+            "$AK3_DIR/tools/ak3-core.sh"
+            "$AK3_DIR/tools/magiskboot"
+          )
           
-          for file in "${REQUIRED_FILES[@]}"; do
-            if [ -f "$AK3_DIR/$file" ]; then
-              SIZE=$(ls -lh "$AK3_DIR/$file" | awk '{print $5}')
-              echo "  ✓ $file ($SIZE)"
+          for file in "${FILES[@]}"; do
+            if [ -f "$file" ]; then
+              echo "  ✓ $(basename $file)"
             else
-              echo "  ❌ Missing: $file"
+              echo "  ✗ Missing: $file"
               exit 1
             fi
           done
-          
-          echo "✓ AnyKernel3 verified"
 
-      # ========================================
-      # CREATE ZIP
-      # ========================================
-
-      - name: Create flashable ZIP
+      - name: Create ZIP
         run: |
           cd $BUILD_DIR
           
           ZIP_NAME="yannnz34u-malachite-${TIMESTAMP}.zip"
           
-          echo "Creating ZIP: $ZIP_NAME"
+          echo "Creating $ZIP_NAME..."
+          zip -r9q $ZIP_NAME ak3/ -x "ak3/.git*" "ak3/*.bak" "ak3/.*"
           
-          if ! zip -r9q $ZIP_NAME ak3/ \
-            -x "ak3/.git*" "ak3/*.original" "ak3/.*" "ak3/README*"; then
-            echo "❌ ZIP creation failed!"
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "ZIP creation failed"
             exit 1
           fi
           
           SIZE=$(ls -lh $ZIP_NAME | awk '{print $5}')
-          echo "✓ ZIP created: $SIZE"
+          echo "ZIP created: $SIZE"
           
-          # Copy to workspace
           mkdir -p $GITHUB_WORKSPACE/output
           cp $ZIP_NAME $GITHUB_WORKSPACE/output/
           
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-
-      # ========================================
-      # CHECKSUMS & INFO
-      # ========================================
 
       - name: Generate checksums
         run: |
@@ -364,54 +264,32 @@ ANYKERNEL_SCRIPT
           echo "SHA256=$SHA256" >> $GITHUB_ENV
           echo "MD5=$MD5" >> $GITHUB_ENV
           
-          echo "$SHA256  $ZIP_NAME" > CHECKSUMS.txt
-          echo "$MD5  $ZIP_NAME" >> CHECKSUMS.txt
+          {
+            echo "SHA256: $SHA256"
+            echo "MD5: $MD5"
+          } > $GITHUB_WORKSPACE/output/CHECKSUMS.txt
           
-          cp CHECKSUMS.txt $GITHUB_WORKSPACE/output/
-          
-          cat CHECKSUMS.txt
+          echo "Checksums generated"
 
       - name: Create build info
         run: |
-          cat > $GITHUB_WORKSPACE/output/BUILD_INFO.txt << 'INFO'
-╔════════════════════════════════════╗
-║     GKI Kernel Build Complete      ║
-╚════════════════════════════════════╝
-
-Generated: $(date)
-Branch: $KERNEL_BRANCH
-Device: $DEVICE (Poco X7)
-File: $ZIP_NAME
-
-Mode: BYPASS (Extract-less Injection)
-
-Flash via:
-1. KSU Manager (Recommended)
-   - Transfer zip to /sdcard/
-   - KSU Manager → Modules → + → Select zip
-   - Install → Reboot
-
-2. TWRP Recovery
-   - adb reboot recovery
-   - Install → Select zip → Swipe
-
-3. Manual dd
-   - Extract: unzip -q $ZIP_NAME
-   - Flash: dd if=new-boot.img of=/dev/block/by-name/boot_a
-
-Verify:
-adb shell uname -r
-(Should show GKI kernel version)
-
-════════════════════════════════════
-
-INFO
+          {
+            echo "GKI Kernel Build Complete"
+            echo ""
+            echo "Date: $(date)"
+            echo "Branch: $KERNEL_BRANCH"
+            echo "File: $ZIP_NAME"
+            echo ""
+            echo "Flash Instructions:"
+            echo "1. Download $ZIP_NAME"
+            echo "2. KSU Manager: Modules > + > Select zip > Install > Reboot"
+            echo "3. TWRP: adb reboot recovery > Install > Select zip"
+            echo ""
+            echo "Verify:"
+            echo "adb shell uname -r"
+          } > $GITHUB_WORKSPACE/output/BUILD_INFO.txt
           
           cat $GITHUB_WORKSPACE/output/BUILD_INFO.txt
-
-      # ========================================
-      # UPLOAD & SUMMARY
-      # ========================================
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
@@ -420,38 +298,21 @@ INFO
           path: ${{ github.workspace }}/output/
           retention-days: 30
 
-      - name: Create summary
+      - name: Summary
         if: always()
         run: |
           {
-            echo "## ✅ Build Complete"
+            echo "## Build Complete ✓"
             echo ""
-            echo "**Build Info:**"
-            echo "- Date: $(date)"
-            echo "- Branch: $KERNEL_BRANCH"
-            echo "- Device: $DEVICE"
-            echo "- File: $ZIP_NAME"
+            echo "**Output:**"
+            echo "- File: \`$ZIP_NAME\`"
+            echo "- Size: $(ls -lh $GITHUB_WORKSPACE/output/$ZIP_NAME 2>/dev/null | awk '{print $5}')"
             echo ""
             echo "**Download:**"
-            echo "📥 Actions → Artifacts → gki-kernel-$TIMESTAMP"
+            echo "Actions → Artifacts → gki-kernel-$TIMESTAMP"
             echo ""
             echo "**Checksums:**"
             echo "\`\`\`"
-            echo "SHA256: $SHA256"
-            echo "MD5: $MD5"
+            cat $GITHUB_WORKSPACE/output/CHECKSUMS.txt
             echo "\`\`\`"
-            echo ""
-            echo "**Flash:**"
-            echo "KSU Manager → Modules → + → $ZIP_NAME → Install"
           } >> $GITHUB_STEP_SUMMARY
-
-      - name: Show result
-        run: |
-          echo "═════════════════════════════════════"
-          echo "✓ Build Successful!"
-          echo "═════════════════════════════════════"
-          echo ""
-          echo "📦 Output:"
-          ls -lh $GITHUB_WORKSPACE/output/
-          echo ""
-          echo "Download dari: Actions → Artifacts → gki-kernel-$TIMESTAMP"
