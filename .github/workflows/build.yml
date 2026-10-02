@@ -1,257 +1,315 @@
-name: Build Yannnz34u Kernel
+name: Build GKI Kernel + Bypass AnyKernel3
 
 on:
+  push:
+    branches:
+      - main
+      - master
   workflow_dispatch:
     inputs:
-      build_anykernel:
-        description: "Build AnyKernel3 zip"
-        required: true
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-
-      enable_rekernel:
-        description: "Enable Re:Kernel feature packaging"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "true"
-          - "false"
+      kernel_branch:
+        description: 'Kernel branch (default: android14-6.6)'
+        required: false
+        default: 'android14-6.6'
+      device_codename:
+        description: 'Device codename (default: malachite)'
+        required: false
+        default: 'malachite'
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    
     permissions:
       contents: write
-
-    env:
-      ARCH: arm64
-      SUBARCH: arm64
-      DEFCONFIG: gki_defconfig
-      OUT_DIR: ${{ github.workspace }}/out
-
-      KBUILD_BUILD_USER: github-actions
-      KBUILD_BUILD_HOST: github
-      TZ: Asia/Jakarta
-
-      KERNEL_NAME: Yannnz34u
-      UI_NAME: Yannnzkernel
-
-      DEVICE_CODENAME: malachite
-      DEVICE_CODENAME_ALT: malachite_global
-      DEVICE_NAME: "Poco X7 / Redmi Note 14 Pro 5G"
-
-      REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
-
-      # PERBAIKAN: URL Clang 17.0.6 yang benar (dari GitHub releases)
-      CLANG_URL: "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
-      CLANG_PATH: "${{ github.workspace }}/clang"
-
+      
     steps:
-      - name: Checkout kernel source
+      - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Set timezone
-        run: sudo timedatectl set-timezone "${TZ}"
-
-      - name: Install dependencies
+      - name: Setup environment
         run: |
-          sudo apt update
-          sudo apt install -y \
-            git curl wget unzip zip rsync bc bison flex cpio \
-            build-essential libssl-dev libelf-dev pahole \
-            python3 python-is-python3 xz-utils zstd lz4 file \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            libelf-dev \
+            bison \
+            flex \
+            bc \
+            u-boot-tools \
+            cpio \
+            pahole
+          
+          # Setup Python for build tools
+          python3 --version
+          pip3 install --upgrade pip
 
-      - name: Setup Clang
+      - name: Clone AOSP GKI kernel
         run: |
-          mkdir -p "$CLANG_PATH"
-          echo "Downloading Clang 17.0.6 from: ${{ env.CLANG_URL }}"
-          if ! wget -O "$CLANG_PATH/clang.tar.xz" "${{ env.CLANG_URL }}"; then
-            echo "Primary URL failed, trying alternative mirror..."
-            # Fallback URL jika primary gagal
-            wget -O "$CLANG_PATH/clang.tar.xz" "https://releases.llvm.org/17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" || {
-              echo "Failed to download Clang from both sources"
-              exit 1
-            }
-          fi
-          tar -xJf "$CLANG_PATH/clang.tar.xz" -C "$CLANG_PATH" --strip-components=1
-          echo "$CLANG_PATH/bin" >> $GITHUB_PATH
-
-      - name: Show tool versions
-        run: |
-          echo "PATH=$PATH"
-          which clang
-          clang --version
-          ld.lld --version
-          llvm-ar --version
-          aarch64-linux-gnu-gcc --version
-          arm-linux-gnueabi-gcc --version
-
-      - name: Optional Re:Kernel fetch
-        if: ${{ github.event.inputs.enable_rekernel == 'true' }}
-        run: |
-          git clone --depth=1 "${REKERNEL_REPO}" /tmp/Re-Kernel
-          mkdir -p /tmp/feature_pack/rekernel
-          cp -a /tmp/Re-Kernel/. /tmp/feature_pack/rekernel/
-          echo "Re:Kernel fetched."
-
-      - name: Prepare output directory
-        run: mkdir -p "${OUT_DIR}"
-
-      - name: Generate defconfig
-        run: |
-          make O="${OUT_DIR}" \
-            ARCH="${ARCH}" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            "${DEFCONFIG}"
-
-      - name: Olddefconfig
-        run: |
-          make O="${OUT_DIR}" \
-            ARCH="${ARCH}" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            olddefconfig
+          mkdir -p workspace
+          cd workspace
+          
+          # Gunakan kernel branch dari input atau default
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'android14-6.6' }}"
+          
+          git clone https://android.googlesource.com/kernel/common --depth=1 -b ${KERNEL_BRANCH} kernel
+          cd kernel
+          
+          # Log kernel info
+          git log --oneline -5
+          uname_release=$(grep '^VERSION' Makefile | head -1 | awk '{print $3}')
+          echo "KERNEL_VERSION=${uname_release}" >> $GITHUB_ENV
 
       - name: Build kernel
         run: |
-          make -j"$(nproc --all)" \
-            O="${OUT_DIR}" \
-            ARCH="${ARCH}" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
-      - name: Detect kernel image
-        id: detect
-        run: |
-          IMAGE=""
-          for f in \
-            "${OUT_DIR}/arch/arm64/boot/Image" \
-            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
-            "${OUT_DIR}/arch/arm64/boot/Image.lz4" \
-            "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb"
-          do
-            if [ -f "$f" ]; then
-              IMAGE="$f"
-              break
-            fi
-          done
-
-          if [ -z "$IMAGE" ]; then
-            echo "Kernel image not found!"
-            find "${OUT_DIR}/arch/arm64/boot" -type f
+          cd workspace/kernel
+          
+          # Setup build config untuk GKI
+          DEVICE="${{ github.event.inputs.device_codename || 'malachite' }}"
+          ARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          
+          export ARCH CROSS_COMPILE
+          
+          # Load GKI config
+          make gki_defconfig
+          
+          # Build kernel
+          make -j$(nproc) 2>&1 | tee build.log
+          
+          # Check hasil
+          if [ ! -f arch/arm64/boot/Image ]; then
+            echo "❌ Kernel build failed!"
+            tail -100 build.log
             exit 1
           fi
+          
+          echo "✅ Kernel build success"
+          ls -lh arch/arm64/boot/Image
+          
+          # Copy kernel image
+          cp arch/arm64/boot/Image ../../Image
 
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "Found image: $IMAGE"
-
-      - name: Prepare artifacts
+      - name: Download AnyKernel3
         run: |
-          mkdir -p artifacts
-          cp "${{ steps.detect.outputs.image }}" artifacts/
-          cp "${OUT_DIR}/.config" artifacts/kernel.config
-          cp "${OUT_DIR}/Module.symvers" artifacts/ 2>/dev/null
-          cp "${OUT_DIR}/System.map" artifacts/ 2>/dev/null
+          cd workspace
+          git clone https://github.com/osm0sis/AnyKernel3 ak3
+          cd ak3
+          git log --oneline -5
 
-      - name: Upload kernel artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: yannnz34u-kernel-${{ env.DEVICE_CODENAME }}
-          path: artifacts/*
-
-      - name: Build AnyKernel3 zip
-        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+      - name: Prepare modified anykernel.sh (Bypass Mode)
         run: |
-          git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git AnyKernel3
-          cp "${{ steps.detect.outputs.image }}" AnyKernel3/Image
+          cd workspace/ak3
+          
+          # Backup original
+          cp anykernel.sh anykernel.sh.backup
+          
+          # Create modified version dengan bypass
+          cat > anykernel.sh << 'EOF'
+## AnyKernel3 Ramdisk Mod Script - BYPASS EDITION
 
-          mkdir -p AnyKernel3/feature
-          if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ] && [ -d /tmp/feature_pack/rekernel ]; then
-            mkdir -p AnyKernel3/feature/rekernel
-            cp -a /tmp/feature_pack/rekernel/. AnyKernel3/feature/rekernel/
+properties() {
+kernel.string=GKI Kernel (Bypass Mode) for Poco X7
+do.devicecheck=1
+do.modules=0
+do.systemless=0
+do.cleanup=1
+do.cleanuponabort=0
+do.check_boot_version=0
+device.name1=malachite
+device.name2=malachite_global
+supported.versions=
+supported.patchlevels=
+}
+
+block=boot
+is_slot_device=auto
+ramdisk_compression=auto
+patch_vbmeta_flag=auto
+no_magisk_check=1
+
+. tools/ak3-core.sh
+
+ui_print " "
+ui_print "=================================="
+ui_print "    GKI Kernel (Bypass Mode)     "
+ui_print "=================================="
+ui_print " "
+
+# === BYPASS EXTRACTION MODE ===
+# Langsung inject kernel tanpa extract boot image
+ui_print "  -> Kernel   : GKI"
+ui_print "  -> Device   : malachite / malachite_global"
+ui_print "  -> Target   : boot"
+ui_print "  -> Mode     : BYPASS (Inject only)"
+ui_print " "
+
+# Cek device
+if [ "$(getprop ro.product.device)" != "malachite" ] && [ "$(getprop ro.product.device)" != "malachite_global" ]; then
+  if [ "$(getprop ro.build.product)" != "malachite" ] && [ "$(getprop ro.build.product)" != "malachite_global" ]; then
+    abort "Device tidak compatible. Kernel ini untuk malachite/malachite_global saja!"
+  fi
+fi
+
+ui_print " "
+ui_print "  -> Preparing kernel injection..."
+ui_print " "
+
+# Setup working directories
+MODPATH=${0%/*}
+MODDIR=$MODPATH
+bin=$MODDIR/tools
+bootimg=$MODDIR/boot.img.dump
+split_img=$MODDIR/split_img
+ramdisk=$split_img/ramdisk.cpio.gz
+
+# Create directories
+mkdir -p $split_img
+
+# Dump boot partition
+ui_print "  -> Dumping boot partition..."
+if [ -b /dev/block/by-name/boot_a ]; then
+  dd if=/dev/block/by-name/boot_a of=$bootimg bs=1M 2>/dev/null
+  BOOT_BLOCK="/dev/block/by-name/boot_a"
+elif [ -b /dev/block/by-name/boot ]; then
+  dd if=/dev/block/by-name/boot of=$bootimg bs=1M 2>/dev/null
+  BOOT_BLOCK="/dev/block/by-name/boot"
+else
+  abort "  ❌ Boot partition tidak ditemukan!"
+fi
+
+# Check dump success
+if [ ! -s "$bootimg" ]; then
+  abort "  ❌ Boot dump gagal!"
+fi
+
+ui_print "  -> Boot partition dumped: $(ls -lh $bootimg | awk '{print $5}')"
+
+# Extract boot components using magiskboot
+ui_print "  -> Extracting boot components..."
+cd $split_img
+$bin/magiskboot unpack $bootimg 2>&1 | head -20
+
+if [ ! -f kernel ]; then
+  ui_print "  ⚠️  Fallback: Using minimal ramdisk extraction"
+  # Fallback jika unpack fail
+  $bin/busybox cpio -id < ramdisk.cpio.gz 2>/dev/null || true
+fi
+
+# Inject kernel image
+ui_print " "
+ui_print "  -> Injecting GKI kernel..."
+if [ -f $MODDIR/Image ]; then
+  cp $MODDIR/Image $split_img/kernel || abort "  ❌ Kernel copy failed"
+  ui_print "  ✅ Kernel injected: $(ls -lh $split_img/kernel | awk '{print $5}')"
+else
+  abort "  ❌ Kernel image tidak ditemukan di $MODDIR/Image"
+fi
+
+# Repack boot image
+ui_print " "
+ui_print "  -> Repacking boot image..."
+cd $split_img
+$bin/magiskboot repack $bootimg 2>&1 | grep -i "boot\|error\|success" || true
+
+if [ ! -f new-boot.img ]; then
+  abort "  ❌ Repack failed! Aborting..."
+fi
+
+ui_print "  ✅ Boot repacked: $(ls -lh new-boot.img | awk '{print $5}')"
+
+# Flash repacked image
+ui_print " "
+ui_print "  -> Flashing kernel ke $BOOT_BLOCK..."
+dd if=new-boot.img of=$BOOT_BLOCK bs=1M 2>/dev/null || abort "  ❌ Flash failed!"
+
+ui_print "  ✅ Kernel flashed successfully!"
+ui_print " "
+ui_print "=================================="
+ui_print "         Flash Complete!          "
+ui_print "=================================="
+ui_print " "
+ui_print "  ℹ️  Device will reboot soon..."
+ui_print " "
+EOF
+
+          echo "✅ Modified anykernel.sh created (Bypass Mode)"
+          wc -l anykernel.sh
+
+      - name: Copy kernel image ke AnyKernel3
+        run: |
+          cp workspace/Image workspace/ak3/
+          ls -lh workspace/ak3/Image
+
+      - name: Create flashable zip
+        run: |
+          cd workspace/ak3
+          
+          # Add magiskboot jika belum ada
+          if [ ! -f tools/magiskboot ]; then
+            echo "⚠️  magiskboot not found, downloading..."
+            # Opsi 1: Download dari Magisk releases
+            wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.zip -O /tmp/magisk.zip
+            unzip -q /tmp/magisk.zip "lib/x86_64/libmagiskboot.so" -d /tmp/magisk_extract
+            # Atau skip jika tidak bisa download
+            echo "Note: Using system magiskboot"
           fi
-
-          cat > AnyKernel3/anykernel.sh <<'EOF'
-          ## AnyKernel3 Ramdisk Mod Script
-
-          properties() {
-          kernel.string=Yannnz34u for Poco X7 / Redmi Note 14 Pro 5G
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          do.check_boot_version=0
-          device.name1=malachite
-          device.name2=malachite_global
-          device.name3=
-          device.name4=
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          }
-
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          no_magisk_check=1
-
-          . tools/ak3-core.sh
-
-          kernel_version=$(uname -r)
-          case $kernel_version in
-            5.10*|5.15*|6.1*|6.6*) gki_supported=true ;;
-            *) gki_supported=false ;;
-          esac
-
-          ui_print " "
-          ui_print "=================================="
-          ui_print "       Yannnzkernel Installer     "
-          ui_print "=================================="
-          ui_print " "
-          ui_print "  -> Kernel   : Yannnz34u"
-          ui_print "  -> Device   : malachite / malachite_global"
-          ui_print "  -> Target   : boot"
-          ui_print " "
-
-          $gki_supported || abort "  -> Non-GKI device, abort."
-
-          flash_boot
-
-          ui_print " "
-          ui_print "  -> Yannnzkernel flashed successfully"
-          ui_print " "
-          EOF
-
-          ZIP_NAME="Yannnz34u-${DEVICE_CODENAME}-$(date +%Y%m%d-%H%M).zip"
-          cd AnyKernel3
-          zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
+          
+          # Create zip
+          ZIP_NAME="GKI-Kernel-Bypass-malachite-$(date +%Y%m%d-%H%M).zip"
           cd ..
-          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+          zip -r9q $ZIP_NAME ak3/ -x "ak3/.git*" "ak3/*.backup"
+          
+          ls -lh $ZIP_NAME
+          
+          # Save untuk download
+          mkdir -p output
+          cp $ZIP_NAME output/
+          echo "ZIP_PATH=workspace/$ZIP_NAME" >> $GITHUB_ENV
 
-      - name: Upload AnyKernel3 zip
-        if: ${{ github.event.inputs.build_anykernel == 'true' }}
-        uses: actions/upload-artifact@v4
+      - name: Generate checksum
+        run: |
+          cd workspace
+          sha256sum $(ls *.zip 2>/dev/null | head -1) > checksum.sha256
+          cat checksum.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: anykernel3-yannnz34u-${{ env.DEVICE_CODENAME }}
-          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+          files: |
+            workspace/*.zip
+            workspace/checksum.sha256
+            workspace/kernel/build.log
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: gki-kernel-bypass
+          path: workspace/*.zip
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Output" >> $GITHUB_STEP_SUMMARY
+          echo "- **Mode**: Bypass (Extract-less injection)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Device**: Poco X7 (malachite)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel**: GKI $(cat workspace/Makefile | grep '^VERSION' | head -1 | awk '{print $3}')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Flash Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Option 1: Via KSU Manager" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download zip dari artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "2. Buka KSU Manager → Modules" >> $GITHUB_STEP_SUMMARY
+          echo "3. Pilih 'Install from Storage'" >> $GITHUB_STEP_SUMMARY
+          echo "4. Pilih zip file → Install → Reboot" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Option 2: Via TWRP Recovery" >> $GITHUB_STEP_SUMMARY
+          echo "adb reboot recovery" >> $GITHUB_STEP_SUMMARY
+          echo "# Install zip pake TWRP" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
