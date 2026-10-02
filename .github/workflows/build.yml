@@ -1,4 +1,4 @@
-name: Build GKI Kernel + Bypass
+name: Build GKI Kernel
 
 on:
   push:
@@ -8,137 +8,76 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup vars
+      
+      - name: Setup
         run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           echo "BUILD_DIR=/tmp/gki" >> $GITHUB_ENV
-          echo "TIMESTAMP=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
-
-      - name: Free space
+      
+      - name: Free Space
         run: |
           sudo rm -rf /usr/local/lib/android /opt/ghc 2>/dev/null || true
           sudo apt-get clean
-
-      - name: Install deps
+      
+      - name: Install Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential libssl-dev libelf-dev bison flex bc u-boot-tools cpio pahole wget curl git zip
-
-      - name: Prepare
-        run: |
-          mkdir -p $BUILD_DIR
-          cd $BUILD_DIR
-
-      - name: Clone kernel
+          sudo apt-get install -y build-essential libssl-dev libelf-dev bison flex bc u-boot-tools cpio pahole git zip
+      
+      - name: Prepare Build Dir
+        run: mkdir -p $BUILD_DIR
+      
+      - name: Clone Kernel
         run: |
           cd $BUILD_DIR
           git clone https://android.googlesource.com/kernel/common --depth=1 -b android14-6.6 kernel
-          cd kernel
-          echo "Kernel cloned"
-
-      - name: Build
+      
+      - name: Build Kernel
         run: |
           cd $BUILD_DIR/kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make gki_defconfig > /dev/null 2>&1
-          timeout 120m make -j$(nproc) || exit 1
-          ls -lh arch/arm64/boot/Image
-
-      - name: Copy kernel
+          make gki_defconfig
+          timeout 120m make -j$(nproc)
+      
+      - name: Copy Kernel
+        run: cp $BUILD_DIR/kernel/arch/arm64/boot/Image $BUILD_DIR/Image
+      
+      - name: Clone AnyKernel3
+        run: cd $BUILD_DIR && git clone https://github.com/osm0sis/AnyKernel3.git ak3
+      
+      - name: Update Anykernel Script
         run: |
-          cp $BUILD_DIR/kernel/arch/arm64/boot/Image $BUILD_DIR/Image
-
-      - name: Clone AK3
-        run: |
-          cd $BUILD_DIR
-          git clone https://github.com/osm0sis/AnyKernel3.git ak3
-
-      - name: Modify anykernel
-        run: |
-          cp $BUILD_DIR/ak3/anykernel.sh $BUILD_DIR/ak3/anykernel.sh.bak
-          cat > $BUILD_DIR/ak3/anykernel.sh << 'ANYKERNEL_EOF'
-## AnyKernel3 - GKI Bypass
-
-properties() {
-kernel.string=GKI Bypass
-do.devicecheck=1
-do.modules=0
-do.systemless=0
-do.cleanup=1
-device.name1=malachite
-device.name2=malachite_global
-}
-
-block=boot
-is_slot_device=auto
-ramdisk_compression=auto
-patch_vbmeta_flag=auto
-no_magisk_check=1
-
-. tools/ak3-core.sh
-
-ui_print " "
-ui_print "GKI Kernel Bypass"
-ui_print " "
-
-MODPATH=${0%/*}
-bin=$MODPATH/tools
-bootimg=$MODPATH/boot.img.dump
-split_img=$MODPATH/split_img
-
-mkdir -p $split_img
-
-BOOT_PARTITION="/dev/block/by-name/boot_a"
-if [ ! -b $BOOT_PARTITION ]; then
-  BOOT_PARTITION="/dev/block/by-name/boot"
-fi
-
-dd if=$BOOT_PARTITION of=$bootimg bs=1M 2>/dev/null
-cd $split_img
-$bin/magiskboot unpack $bootimg > /dev/null 2>&1
-cp $MODPATH/Image kernel
-$bin/magiskboot repack $bootimg > /dev/null 2>&1
-dd if=new-boot.img of=$BOOT_PARTITION bs=1M 2>/dev/null
-cd /
-rm -rf $split_img $bootimg
-
-ui_print "Done!"
-ui_print " "
-
-ANYKERNEL_EOF
-          chmod +x $BUILD_DIR/ak3/anykernel.sh
-
-      - name: Copy Image
+          cd $BUILD_DIR/ak3
+          cp anykernel.sh anykernel.sh.bak
+          sed -i 's/device.name1=.*/device.name1=malachite/g' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=malachite_global/g' anykernel.sh
+      
+      - name: Copy Kernel to AK3
         run: cp $BUILD_DIR/Image $BUILD_DIR/ak3/
-
+      
       - name: Create ZIP
         run: |
           cd $BUILD_DIR
-          ZIP_NAME="yannnz34u-malachite-${TIMESTAMP}.zip"
-          zip -r9q $ZIP_NAME ak3/ -x "ak3/.git*" "ak3/*.bak" "ak3/.*"
+          ZIP_NAME="yannnz34u-malachite-$TIMESTAMP.zip"
+          zip -r9q $ZIP_NAME ak3/ -x "ak3/.git*"
           mkdir -p output
           cp $ZIP_NAME output/
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-
+      
       - name: Checksums
         run: |
           cd $BUILD_DIR
           sha256sum $ZIP_NAME > output/SHA256.txt
           md5sum $ZIP_NAME > output/MD5.txt
-          cat output/SHA256.txt
-
+      
       - name: Upload
         uses: actions/upload-artifact@v3
         with:
-          name: gki-kernel-${{ env.TIMESTAMP }}
+          name: gki-${{ env.TIMESTAMP }}
           path: /tmp/gki/output/
           retention-days: 30
-
-      - name: Done
-        run: echo "Build complete. Check Artifacts."
