@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Menggunakan Ubuntu LTS 22.04
     
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +42,7 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make gki_defconfig
-          timeout 120m make -j$(nproc)
+          timeout 120m make -j$(nproc) || { echo "Build failed"; exit 1; }
       
       - name: Copy Kernel
         run: cp $BUILD_DIR/kernel/arch/arm64/boot/Image $BUILD_DIR/Image
@@ -79,5 +79,5 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: gki-${{ env.TIMESTAMP }}
-          path: /tmp/gki/output/
+          path: $BUILD_DIR/output/
           retention-days: 30
