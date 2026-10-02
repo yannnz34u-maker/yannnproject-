@@ -46,7 +46,7 @@ jobs:
 
       REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
 
-      CLANG_URL: "https://android.googlesource.com/toolchain/llvm-project/+archive/17.0.2.tar.gz"  # Ganti dengan URL rilis Clang yang relevan
+      CLANG_URL: "https://releases.llvm.org/downloads/release/17.0.6/clang+llvm-17.0.6-linux-aarch64.tar.xz"  # URL untuk Clang 17.0.6
       CLANG_PATH: "${{ github.workspace }}/clang"
 
     steps:
@@ -71,8 +71,8 @@ jobs:
       - name: Setup Clang
         run: |
           mkdir -p $CLANG_PATH
-          wget -O "$CLANG_PATH/clang.tar.gz" "${{ env.CLANG_URL }}"
-          tar -xzf "$CLANG_PATH/clang.tar.gz" -C "$CLANG_PATH" --strip-components=1
+          wget -O "$CLANG_PATH/clang.tar.xz" "${{ env.CLANG_URL }}"
+          tar -xJf "$CLANG_PATH/clang.tar.xz" -C "$CLANG_PATH" --strip-components=1
           echo "$CLANG_PATH/bin" >> $GITHUB_PATH
 
       - name: Show tool versions
