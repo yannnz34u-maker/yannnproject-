@@ -46,7 +46,8 @@ jobs:
 
       REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
 
-      CLANG_URL: "https://releases.llvm.org/downloads/release/17.0.6/clang+llvm-17.0.6-linux-aarch64.tar.xz"  # URL untuk Clang 17.0.6
+      # PERBAIKAN: URL Clang 17.0.6 yang benar (dari GitHub releases)
+      CLANG_URL: "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
       CLANG_PATH: "${{ github.workspace }}/clang"
 
     steps:
@@ -71,7 +72,15 @@ jobs:
       - name: Setup Clang
         run: |
           mkdir -p "$CLANG_PATH"
-          wget -O "$CLANG_PATH/clang.tar.xz" "${{ env.CLANG_URL }}"
+          echo "Downloading Clang 17.0.6 from: ${{ env.CLANG_URL }}"
+          if ! wget -O "$CLANG_PATH/clang.tar.xz" "${{ env.CLANG_URL }}"; then
+            echo "Primary URL failed, trying alternative mirror..."
+            # Fallback URL jika primary gagal
+            wget -O "$CLANG_PATH/clang.tar.xz" "https://releases.llvm.org/17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" || {
+              echo "Failed to download Clang from both sources"
+              exit 1
+            }
+          fi
           tar -xJf "$CLANG_PATH/clang.tar.xz" -C "$CLANG_PATH" --strip-components=1
           echo "$CLANG_PATH/bin" >> $GITHUB_PATH
 
