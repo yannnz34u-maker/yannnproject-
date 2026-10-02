@@ -1,209 +1,248 @@
-name: Build Kernel 6.1.77 with KernelSU
+name: Build Yannnz34u Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      kernelsu_version:
-        description: 'KernelSU version (default: latest)'
-        required: false
-        default: 'latest'
+      build_anykernel:
+        description: "Build AnyKernel3 zip"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
-env:
-  KERNEL_VERSION: 6.1.77
-  KERNEL_SOURCE_URL: https://github.com/torvalds/linux.git
-  CLANG_VERSION: 17.0.2
-  ANDROID_MAJOR: 14
-  DEVICE_CODENAME: malachite
+      enable_rekernel:
+        description: "Enable Re:Kernel feature packaging"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-latest
-    
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      DEFCONFIG: gki_defconfig
+      OUT_DIR: ${{ github.workspace }}/out
+
+      KBUILD_BUILD_USER: github-actions
+      KBUILD_BUILD_HOST: github
+      TZ: Asia/Jakarta
+
+      KERNEL_NAME: Yannnz34u
+      UI_NAME: Yannnzkernel
+
+      DEVICE_CODENAME: malachite
+      DEVICE_CODENAME_ALT: malachite_global
+      DEVICE_NAME: "Poco X7 / Redmi Note 14 Pro 5G"
+
+      REKERNEL_REPO: "https://github.com/Sakion-Team/Re-Kernel.git"
+
+      CLANG_URL: "https://android.googlesource.com/toolchain/llvm-project/+archive/17.0.2.tar.gz"  # Ganti dengan URL rilis Clang yang relevan
+      CLANG_PATH: "${{ github.workspace }}/clang"
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Setup build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libelf-dev \
-            libssl-dev \
-            rsync \
-            git \
-            ccache
+      - name: Set timezone
+        run: sudo timedatectl set-timezone "${TZ}"
 
-      - name: Setup Clang toolchain
+      - name: Install dependencies
         run: |
-          mkdir -p ${{ github.workspace }}/clang
-          cd ${{ github.workspace }}/clang
-          
-          # Download Android Clang 17.0.2
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r1/clang-r468698b.tar.gz -O clang.tar.gz
-          tar -xzf clang.tar.gz
-          rm clang.tar.gz
-          
-          echo "CLANG_PATH=${{ github.workspace }}/clang" >> $GITHUB_ENV
+          sudo apt update
+          sudo apt install -y \
+            git curl wget unzip zip rsync bc bison flex cpio \
+            build-essential libssl-dev libelf-dev pahole \
+            python3 python-is-python3 xz-utils zstd lz4 file \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-      - name: Clone kernel source
+      - name: Setup Clang
         run: |
-          mkdir -p ${{ github.workspace }}/kernel
-          cd ${{ github.workspace }}/kernel
-          
-          git clone --depth=1 --branch v${{ env.KERNEL_VERSION }} ${{ env.KERNEL_SOURCE_URL }} linux
-          cd linux
-          git log --oneline -1
+          mkdir -p $CLANG_PATH
+          wget -O "$CLANG_PATH/clang.tar.gz" "${{ env.CLANG_URL }}"
+          tar -xzf "$CLANG_PATH/clang.tar.gz" -C "$CLANG_PATH" --strip-components=1
+          echo "$CLANG_PATH/bin" >> $GITHUB_PATH
 
-      - name: Setup KernelSU
+      - name: Show tool versions
         run: |
-          cd ${{ github.workspace }}/kernel/linux
-          
-          # Download KernelSU
-          KERNELSU_VERSION="${{ github.event.inputs.kernelsu_version }}"
-          if [ "$KERNELSU_VERSION" = "latest" ]; then
-            KERNELSU_VERSION=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | grep tag_name | head -1 | cut -d'"' -f4)
-          fi
-          
-          echo "Using KernelSU version: $KERNELSU_VERSION"
-          
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/kernel/$KERNELSU_VERSION/kernel/setup.sh" | bash -
-          
-      - name: Get device defconfig
+          echo "PATH=$PATH"
+          which clang
+          clang --version
+          ld.lld --version
+          llvm-ar --version
+          aarch64-linux-gnu-gcc --version
+          arm-linux-gnueabi-gcc --version
+
+      - name: Optional Re:Kernel fetch
+        if: ${{ github.event.inputs.enable_rekernel == 'true' }}
         run: |
-          cd ${{ github.workspace }}/kernel/linux
-          
-          # Untuk Poco X7 (MediaTek Dimensity 7300)
-          # Adjust defconfig path sesuai struktur source
-          ls arch/arm64/configs/ | grep -i malachite || echo "Using generic defconfig"
+          git clone --depth=1 "${REKERNEL_REPO}" /tmp/Re-Kernel
+          mkdir -p /tmp/feature_pack/rekernel
+          cp -a /tmp/Re-Kernel/. /tmp/feature_pack/rekernel/
+          echo "Re:Kernel fetched."
+
+      - name: Prepare output directory
+        run: mkdir -p "${OUT_DIR}"
+
+      - name: Generate defconfig
+        run: |
+          make O="${OUT_DIR}" \
+            ARCH="${ARCH}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            "${DEFCONFIG}"
+
+      - name: Olddefconfig
+        run: |
+          make O="${OUT_DIR}" \
+            ARCH="${ARCH}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            olddefconfig
 
       - name: Build kernel
         run: |
-          cd ${{ github.workspace }}/kernel/linux
-          
-          export PATH="${{ env.CLANG_PATH }}/bin:$PATH"
-          export CROSS_COMPILE="${{ env.CLANG_PATH }}/bin/llvm-"
-          export CC="clang"
-          export CXX="clang++"
-          
-          # Make defconfig (adjust untuk device kamu)
-          make O=out ARCH=arm64 CROSS_COMPILE=llvm- CC=clang malachite_defconfig
-          
-          # Build dengan clang
-          make -j$(nproc) O=out \
-            ARCH=arm64 \
+          make -j"$(nproc --all)" \
+            O="${OUT_DIR}" \
+            ARCH="${ARCH}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
             CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE="${{ env.CLANG_PATH }}/bin/llvm-" \
-            CROSS_COMPILE_ARM32="${{ env.CLANG_PATH }}/bin/llvm-"
-          
-          # Copy kernel image
-          mkdir -p ${{ github.workspace }}/out
-          cp out/arch/arm64/boot/Image ${{ github.workspace }}/out/
-          cp out/arch/arm64/boot/Image.gz ${{ github.workspace }}/out/ 2>/dev/null || true
-          cp out/arch/arm64/boot/dts/mediatek/mt6895.dtb ${{ github.workspace }}/out/ 2>/dev/null || true
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-      - name: Setup AnyKernel3
+      - name: Detect kernel image
+        id: detect
         run: |
-          mkdir -p ${{ github.workspace }}/anykernel
-          cd ${{ github.workspace }}/anykernel
-          
-          git clone https://github.com/osm0sis/AnyKernel3.git .
-          
-          # Copy compiled kernel
-          cp ${{ github.workspace }}/out/Image kernel/Image
-          cp ${{ github.workspace }}/out/Image.gz kernel/Image.gz 2>/dev/null || true
-          
-          # Copy DTB jika ada
-          mkdir -p kernel/dtb/mediatek
-          cp ${{ github.workspace }}/out/*.dtb kernel/dtb/mediatek/ 2>/dev/null || true
-
-      - name: Customize AnyKernel3 properties
-        run: |
-          cd ${{ github.workspace }}/anykernel
-          
-          cat > anykernel.sh << 'EOF'
-          # AnyKernel3 Ramdisk Mod Script
-          # For Poco X7 (malachite) with KernelSU
-          
-          properties() {
-            set PATCHVERSIONFL=""
-            file_getprop("/tmp/anykernel/common/system.prop", "ro.kernel.android.checkjni")
-            if [ $? -eq 1 ]; then
-              set PATCHVERSIONFL="$(file_getprop("$MODPATH/system.prop", "version"))"
+          IMAGE=""
+          for f in \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
+            "${OUT_DIR}/arch/arm64/boot/Image.lz4" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb"
+          do
+            if [ -f "$f" ]; then
+              IMAGE="$f"
+              break
             fi
-            set PATCHVERSIONFL="KernelSU v6.1.77-$PATCHVERSIONFL"
+          done
+
+          if [ -z "$IMAGE" ]; then
+            echo "Kernel image not found!"
+            find "${OUT_DIR}/arch/arm64/boot" -type f
+            exit 1
+          fi
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Found image: $IMAGE"
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp "${{ steps.detect.outputs.image }}" artifacts/
+          cp "${OUT_DIR}/.config" artifacts/kernel.config
+          cp "${OUT_DIR}/Module.symvers" artifacts/ 2>/dev/null
+          cp "${OUT_DIR}/System.map" artifacts/ 2>/dev/null
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: yannnz34u-kernel-${{ env.DEVICE_CODENAME }}
+          path: artifacts/*
+
+      - name: Build AnyKernel3 zip
+        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+        run: |
+          git clone --depth=1 https://github.com/KernelSU-Next/AnyKernel3.git AnyKernel3
+          cp "${{ steps.detect.outputs.image }}" AnyKernel3/Image
+
+          mkdir -p AnyKernel3/feature
+          if [ "${{ github.event.inputs.enable_rekernel }}" = "true" ] && [ -d /tmp/feature_pack/rekernel ]; then
+            mkdir -p AnyKernel3/feature/rekernel
+            cp -a /tmp/feature_pack/rekernel/. AnyKernel3/feature/rekernel/
+          fi
+
+          cat > AnyKernel3/anykernel.sh <<'EOF'
+          ## AnyKernel3 Ramdisk Mod Script
+
+          properties() {
+          kernel.string=Yannnz34u for Poco X7 / Redmi Note 14 Pro 5G
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          do.check_boot_version=0
+          device.name1=malachite
+          device.name2=malachite_global
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
           }
-          
-          # begin properties
-            kernel.string=Malachite Kernel KernelSU
-            do.devicecheck=1
-            do.modules=0
-            do.systemlessly=0
-            do.cleanup=1
-            do.cleanuponabort=0
-            device.name1=malachite
-            device.name2=poco x7
-            supported.versions=14
-            supported.patchlevels=
-          # end properties
-          
-          block_list=(
-            "/dev/block/bootdevice/by-name/kernel"
-            "/dev/block/bootdevice/by-name/vendor_boot"
-            "kernel"
-            "vendor_boot"
-          );
-          
-          is_mounted /system || mount -o ro -t auto /system
-          is_mounted /vendor || mount -t auto /vendor
-          
+
+          block=boot
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          no_magisk_check=1
+
+          . tools/ak3-core.sh
+
+          kernel_version=$(uname -r)
+          case $kernel_version in
+            5.10*|5.15*|6.1*|6.6*) gki_supported=true ;;
+            *) gki_supported=false ;;
+          esac
+
           ui_print " "
-          ui_print "Installing Malachite Kernel with KernelSU..."
+          ui_print "=================================="
+          ui_print "       Yannnzkernel Installer     "
+          ui_print "=================================="
           ui_print " "
-          
-          dump_boot
-          
-          ui_print "Flashing kernel..."
-          flash_kernel
-          
+          ui_print "  -> Kernel   : Yannnz34u"
+          ui_print "  -> Device   : malachite / malachite_global"
+          ui_print "  -> Target   : boot"
           ui_print " "
-          ui_print "Installation complete!"
+
+          $gki_supported || abort "  -> Non-GKI device, abort."
+
+          flash_boot
+
+          ui_print " "
+          ui_print "  -> Yannnzkernel flashed successfully"
           ui_print " "
           EOF
 
-      - name: Create flashable ZIP
-        run: |
-          cd ${{ github.workspace }}/anykernel
-          
-          # Rename untuk clarity
-          KERNEL_ZIP="Malachite-Kernel-6.1.77-KernelSU-$(date +%Y%m%d).zip"
-          
-          zip -r "${{ github.workspace }}/$KERNEL_ZIP" . \
-            -x "*.git*" \
-            ".gitignore" \
-            "README*"
-          
-          ls -lh "${{ github.workspace }}/$KERNEL_ZIP"
+          ZIP_NAME="Yannnz34u-${DEVICE_CODENAME}-$(date +%Y%m%d-%H%M).zip"
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md" "*placeholder"
+          cd ..
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
+      - name: Upload AnyKernel3 zip
+        if: ${{ github.event.inputs.build_anykernel == 'true' }}
+        uses: actions/upload-artifact@v4
         with:
-          name: kernel-builds
-          path: |
-            ${{ github.workspace }}/Malachite-*.zip
-            ${{ github.workspace }}/out/
-          retention-days: 30
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: ncipollo/release-action@v1
-        with:
-          artifacts: "${{ github.workspace }}/Malachite-*.zip"
-          token: ${{ secrets.GITHUB_TOKEN }}
-          makeLatest: true
+          name: anykernel3-yannnz34u-${{ env.DEVICE_CODENAME }}
+          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
