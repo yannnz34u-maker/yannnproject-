@@ -70,7 +70,7 @@ jobs:
 
       - name: Setup Clang
         run: |
-          mkdir -p $CLANG_PATH
+          mkdir -p "$CLANG_PATH"
           wget -O "$CLANG_PATH/clang.tar.xz" "${{ env.CLANG_URL }}"
           tar -xJf "$CLANG_PATH/clang.tar.xz" -C "$CLANG_PATH" --strip-components=1
           echo "$CLANG_PATH/bin" >> $GITHUB_PATH
