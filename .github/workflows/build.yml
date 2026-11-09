@@ -61,11 +61,13 @@ jobs:
           curl -sL -o /tmp/bbrv3.patch \
             https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/bbrv3/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch
 
+          # Coba apply (fuzz 3 biar lebih toleran)
           if patch -p1 --dry-run -F3 < /tmp/bbrv3.patch > /dev/null 2>&1; then
             patch -p1 -F3 < /tmp/bbrv3.patch
             echo "BBRv3 patch applied successfully"
           else
             echo "WARNING: BBRv3 patch failed to apply cleanly. Falling back to enable stock BBR only."
+            # Fallback: tetap enable BBR biasa
           fi
 
       # ====================== Re-Kernel ======================
@@ -75,6 +77,7 @@ jobs:
           cd kernel
           echo "===== Integrating Re-Kernel (built-in) ====="
 
+          # Buat folder & header
           mkdir -p drivers/rekernel
           cat > drivers/rekernel/rekernel.h << 'EOF'
           #ifndef _REKERNEL_H
@@ -185,15 +188,15 @@ jobs:
           #endif /* _REKERNEL_H */
           EOF
 
-          # Salin ke include/linux agar mudah di-include
-          cp drivers/rekernel/rekernel.h include/linux/rekernel.h
-
-          # Tambahkan include di binder.c (best-effort)
-          if ! grep -q "rekernel.h" drivers/android/binder.c 2>/dev/null; then
-            sed -i '1i#include <linux/rekernel.h>' drivers/android/binder.c || true
+          # Tambahkan include di binder.c (paling atas setelah include yang ada)
+          if ! grep -q "rekernel.h" drivers/android/binder.c; then
+            sed -i '1i#include "rekernel/rekernel.h"' drivers/android/binder.c 2>/dev/null || \
+            sed -i '1i#include <linux/rekernel.h>' drivers/android/binder.c
+            # Pindahkan header ke include/linux biar lebih aman
+            cp drivers/rekernel/rekernel.h include/linux/rekernel.h
           fi
 
-          echo "Re-Kernel header created (best-effort injection)."
+          echo "Re-Kernel header created. Hook injection is best-effort."
           echo "Jika build gagal di binder/signal, matikan enable_rekernel."
 
       - name: Configure GKI Defconfig
@@ -215,7 +218,7 @@ jobs:
               -e CONFIG_DEFAULT_BBR \
               -d CONFIG_DEFAULT_CUBIC || true
 
-            # Kalau patch BBRv3 berhasil membuat CONFIG_TCP_CONG_BBR3
+            # Kalau patch BBRv3 berhasil bikin CONFIG_TCP_CONG_BBR3
             ./scripts/config --file out/.config \
               -e CONFIG_TCP_CONG_BBR3 2>/dev/null || true
           fi
