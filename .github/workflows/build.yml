@@ -1,44 +1,7 @@
-
 name: YannzProject - Malachite GKI 6.1.174
 
 on:
   workflow_dispatch:
-    inputs:
-      clang_choice:
-        description: 'Pilih Clang Toolchain Compiler'
-        required: true
-        type: choice
-        default: 'aosp_r584948'
-        options:
-          - 'aosp_r584948'
-          - 'neutron'
-          - 'clang_19'
-          - 'clang_22'
-          - 'system'
-
-      enable_bbrv3:
-        description: 'Aktifkan TCP BBRv3'
-        required: false
-        type: boolean
-        default: true
-
-      enable_rekernel:
-        description: 'Integrasi Re-Kernel'
-        required: false
-        type: boolean
-        default: false
-
-      enable_susfs:
-        description: 'Aktifkan SUSFS'
-        required: false
-        type: boolean
-        default: false
-
-      enable_wifi_bt:
-        description: 'Aktifkan konfigurasi Wi-Fi & Bluetooth'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -50,7 +13,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Kernel Source
+      - name: Checkout Kernel Source (Branch main)
         uses: actions/checkout@v4
         with:
           ref: main
@@ -64,168 +27,43 @@ jobs:
             git curl wget zip unzip \
             libssl-dev libelf-dev \
             python3 python3-pip \
+            clang llvm lld \
             pahole lz4 \
             device-tree-compiler \
-            rsync ccache zstd
-
-      - name: Setup Compiler Toolchain
-        run: |
-          mkdir -p toolchain
-          TOOLCHAIN_DIR="$GITHUB_WORKSPACE/toolchain"
-
-          case "${{ github.event.inputs.clang_choice }}" in
-            "aosp_r584948")
-              echo "Downloading AOSP Clang r584948..."
-              git clone --depth=1 \
-                https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-                "$TOOLCHAIN_DIR/aosp-clang" \
-                -b mirror-goog-main-llvm-toolchain-source
-              echo "$TOOLCHAIN_DIR/aosp-clang/clang-r584948/bin" >> "$GITHUB_PATH"
-              ;;
-
-            "neutron")
-              echo "Downloading Neutron Clang..."
-              mkdir -p "$TOOLCHAIN_DIR/neutron"
-              cd "$TOOLCHAIN_DIR/neutron"
-              curl -LO https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/06092026/neutron-clang-06092026.tar.zst
-              tar -I zstd -xf neutron-clang-06092026.tar.zst
-              echo "$TOOLCHAIN_DIR/neutron/bin" >> "$GITHUB_PATH"
-              ;;
-
-            "clang_19")
-              echo "Installing LLVM Clang 19..."
-              wget https://apt.llvm.org/llvm.sh
-              chmod +x llvm.sh
-              sudo ./llvm.sh 19
-              sudo apt-get install -y lld-19 llvm-19
-              mkdir -p "$TOOLCHAIN_DIR/clang-19-bin"
-              ln -sf "$(which clang-19)" "$TOOLCHAIN_DIR/clang-19-bin/clang"
-              ln -sf "$(which ld.lld-19)" "$TOOLCHAIN_DIR/clang-19-bin/ld.lld"
-              ln -sf "$(which llvm-ar-19)" "$TOOLCHAIN_DIR/clang-19-bin/llvm-ar"
-              ln -sf "$(which llvm-objcopy-19)" "$TOOLCHAIN_DIR/clang-19-bin/llvm-objcopy"
-              ln -sf "$(which llvm-strip-19)" "$TOOLCHAIN_DIR/clang-19-bin/llvm-strip"
-              echo "$TOOLCHAIN_DIR/clang-19-bin" >> "$GITHUB_PATH"
-              ;;
-
-            "clang_22")
-              echo "Installing LLVM Clang 22..."
-              mkdir -p "$TOOLCHAIN_DIR/clang-22"
-              cd "$TOOLCHAIN_DIR/clang-22"
-
-              curl -fL -o clang.tar.xz \
-                https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-linux-gnu.tar.xz
-
-              tar -xf clang.tar.xz --strip-components=1
-              echo "$TOOLCHAIN_DIR/clang-22/bin" >> "$GITHUB_PATH"
-              ;;
-
-            "system")
-              echo "Using Ubuntu system Clang..."
-              sudo apt-get install -y clang llvm lld
-              ;;
-          esac
+            rsync ccache
 
       - name: Clone AnyKernel3
         run: |
-          git clone --depth=1 \
-            https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-      - name: Patch Re-Kernel Integration
-        if: ${{ github.event.inputs.enable_rekernel == 'true' }}
-        run: |
-          echo "Cloning Re-Kernel..."
-          git clone --depth=1 \
-            https://github.com/Sakion-Team/Re-Kernel.git re-kernel
-
-          if [ -d "re-kernel/Integrate" ]; then
-            cp -r re-kernel/Integrate/* kernel/
-          fi
-
-      - name: Verify Kernel Version & Compiler
+      - name: Verify Kernel Version
         run: |
           cd kernel
-
-          echo "===== COMPILER ====="
-          clang --version
-
           echo "===== KERNEL VERSION ====="
           make -s kernelversion
-
-          echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
 
-      - name: Configure GKI Defconfig & Features
+      - name: Configure GKI Defconfig
         run: |
           cd kernel
-
           make O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             gki_defconfig
 
-          # Wi-Fi & Bluetooth framework
-          if [ "${{ github.event.inputs.enable_wifi_bt }}" = "true" ]; then
-            echo "Enabling Wi-Fi and Bluetooth framework..."
+          ./scripts/config --file out/.config \
+            -d MODULE_SIG_PROTECT
 
-            ./scripts/config --file out/.config \
-              -e MODULES \
-              -e MODVERSIONS \
-              -e CFG80211 \
-              -e RFKILL \
-              -e BT \
-              -e BT_BREDR \
-              -e BT_RFCOMM \
-              -e BT_RFCOMM_TTY \
-              -e BT_HIDP \
-              -e BT_LE
-          fi
-
-          # BBRv3
-          if [ "${{ github.event.inputs.enable_bbrv3 }}" = "true" ]; then
-            echo "Enabling BBR..."
-
-            ./scripts/config --file out/.config \
-              -e TCP_CONG_BBR \
-              -d TCP_CONG_CUBIC \
-              --set-str DEFAULT_TCP_CONG bbr
-          fi
-
-          # SUSFS
-          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
-            echo "Enabling SUSFS..."
-
-            ./scripts/config --file out/.config \
-              -e KSU_SUSFS \
-              -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-              -e KSU_SUSFS_SUS_PATH \
-              -e KSU_SUSFS_SUS_MOUNT
-          fi
-
-          # Normalize configuration
           make O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             olddefconfig
 
-      - name: Verify WiFi Bluetooth Configuration
-        run: |
-          cd kernel
-
-          echo "===== FINAL CONFIG ====="
-          grep -E '^CONFIG_(MODULES|MODVERSIONS|CFG80211|MAC80211|RFKILL|BT|BT_BREDR|BT_RFCOMM|BT_HCIUART)=' out/.config || true
-
-          echo "===== ABI FILES ====="
-          ls -lh \
-            android/abi_gki_aarch64 \
-            android/abi_gki_aarch64_mtk \
-            android/abi_gki_aarch64_xiaomi
-
       - name: Compile GKI Kernel
         run: |
           cd kernel
-
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
@@ -233,35 +71,18 @@ jobs:
             LLVM_IAS=1 \
             Image
 
-      - name: Verify Kernel Image & Symbols
+      - name: Verify Kernel Image Output
         run: |
-          cd kernel
-
-          test -s out/arch/arm64/boot/Image
-
-          echo "===== IMAGE ====="
-          ls -lh out/arch/arm64/boot/Image
-
-          echo "===== MODULE.SYMVERS ====="
-          if [ -f out/Module.symvers ]; then
-            ls -lh out/Module.symvers
-            grep -Ei 'cfg80211|rfkill|bluetooth|hci_' \
-              out/Module.symvers | head -100 || true
-          else
-            echo "Module.symvers not generated"
-          fi
-
-          echo "===== FINAL CONFIG ====="
-          grep -E '^CONFIG_(MODULES|MODVERSIONS|CFG80211|MAC80211|RFKILL|BT)=' \
-            out/.config || true
+          test -s kernel/out/arch/arm64/boot/Image
+          echo "===== KERNEL OUTPUT SIZE ====="
+          ls -lh kernel/out/arch/arm64/boot/Image
 
       - name: Prepare AnyKernel3 Package
         run: |
           mkdir -p release
-
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
-          cat > AnyKernel3/anykernel.sh << 'EOF'
+          cat << 'AK3EOF' > AnyKernel3/anykernel.sh
           properties() { '
           kernel.string=YannzProject GKI 6.1.174 (Universal Malachite)
           do.devicecheck=1
@@ -283,14 +104,12 @@ jobs:
 
           split_boot;
           flash_boot;
-          EOF
+          AK3EOF
 
       - name: Pack AnyKernel3 ZIP
         run: |
           cd AnyKernel3
-
-          zip -r9 \
-            ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
+          zip -r9 ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
             -x '.git/*' \
             -x 'README.md' \
             -x '*placeholder*'
