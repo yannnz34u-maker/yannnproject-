@@ -1,4 +1,4 @@
-name: MalachiteOpt - GKI 6.1.174
+name: MalachiteOpt - GKI 6.1.174 (Full)
 
 on:
   workflow_dispatch:
@@ -7,6 +7,22 @@ on:
         description: "Hanya scan tabel GPU OPP (tanpa compile kernel)"
         type: boolean
         default: false
+      scan_vendor:
+        description: "Ikut scan source vendor MediaTek (MiCode malachite-u-oss)"
+        type: boolean
+        default: false
+      ksu:
+        description: "Tambah KernelSU-Next (root)"
+        type: boolean
+        default: true
+      susfs:
+        description: "Tambah SUSFS (eksperimental, butuh ksu aktif)"
+        type: boolean
+        default: false
+      bbr:
+        description: "Jadikan BBR default TCP congestion control"
+        type: boolean
+        default: true
       cpu_oc:
         description: "Aktifkan CPU overclock"
         type: boolean
@@ -31,9 +47,20 @@ on:
         description: "GPU: tambah voltase (mV), 0 = tidak diubah"
         type: string
         default: "0"
+      release:
+        description: "Buat GitHub Release otomatis"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Tag release (kosong = otomatis dari versi + tanggal)"
+        type: string
+        default: ""
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  ZIP_NAME: MalachiteOpt-GKI-6.1.174
 
 jobs:
   build:
@@ -48,6 +75,11 @@ jobs:
           ref: main
           path: kernel
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
@@ -61,9 +93,17 @@ jobs:
             device-tree-compiler \
             rsync ccache
 
-      - name: Clone AnyKernel3
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-gki-6.1.174-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-gki-6.1.174-
+
+      - name: Clone AnyKernel3 (GKI branch)
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          git clone --depth=1 -b gki-2.0 https://github.com/WildKernels/AnyKernel3.git AnyKernel3
 
       - name: Verify Kernel Version
         run: |
@@ -71,11 +111,21 @@ jobs:
           echo "===== KERNEL VERSION ====="
           make -s kernelversion
           git log -1 --oneline
+          test -f arch/arm64/configs/gki_defconfig || \
+            { echo "::error::gki_defconfig tidak ada di arch/arm64/configs/"; exit 1; }
+
+      - name: Clone vendor MediaTek source (scan saja)
+        if: ${{ inputs.scan_vendor }}
+        run: |
+          git clone --depth=1 -b malachite-u-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git vendor
 
       - name: Find GPU OPP table
         run: |
-          cd kernel
-          {
+          scan() {
+            local dir="$1"
+            echo "##### SCAN: $dir #####"
+            cd "$dir"
             echo "===== GPUFREQ FILES ====="
             find . -ipath '*gpufreq*' \( -name '*.c' -o -name '*.h' \) | head -30
             echo
@@ -84,12 +134,18 @@ jobs:
               -E 'g_default_gpu|g_opp_table|GPU_OPP' . | head -30
             echo
             echo "===== MALI / GED ====="
-            find . -maxdepth 4 -type d \( -iname '*mali*' -o -iname '*ged*' \) | head -20
+            find . -maxdepth 6 -type d \( -iname '*mali*' -o -iname '*ged*' \) | head -20
             echo
             echo "===== DTS GPU OPP ====="
             grep -rIln --include='*.dts' --include='*.dtsi' \
-              -E 'gpu.*opp|opp.*gpu' . | head -20
-          } 2>&1 | tee ../gpu-scan.txt
+              -E 'gpu.*opp|opp.*gpu' . | grep -iE 'mediatek|mt6878|malachite' | head -20
+            echo
+            cd - >/dev/null
+          }
+          {
+            scan kernel
+            if [ -d vendor ]; then scan vendor; fi
+          } 2>&1 | tee gpu-scan.txt
 
       - name: Upload GPU scan report
         uses: actions/upload-artifact@v4
@@ -97,6 +153,25 @@ jobs:
           name: gpu-scan-report
           path: gpu-scan.txt
           retention-days: 7
+
+      - name: Add KernelSU-Next
+        if: ${{ !inputs.scan_only && inputs.ksu }}
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          ls -d KernelSU* drivers/kernelsu 2>/dev/null || true
+
+      - name: Add SUSFS (experimental)
+        if: ${{ !inputs.scan_only && inputs.ksu && inputs.susfs }}
+        continue-on-error: true
+        run: |
+          git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          cd kernel
+          cp ../susfs4ksu/kernel_patches/fs/* fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          echo "CONFIG_KSU_SUSFS=y" > ../susfs.flag
+          echo "SUSFS patch applied"
 
       - name: Write OPP patch script
         if: ${{ !inputs.scan_only && (inputs.cpu_oc || inputs.gpu_oc) }}
@@ -175,45 +250,73 @@ jobs:
 
       - name: Patch CPU OC
         if: ${{ !inputs.scan_only && inputs.cpu_oc }}
+        env:
+          PCT: ${{ inputs.cpu_boost_pct }}
+          MV: ${{ inputs.cpu_volt_mv }}
         run: |
-          python3 patch_opp.py cpu "${{ inputs.cpu_boost_pct }}" "${{ inputs.cpu_volt_mv }}"
+          python3 patch_opp.py cpu "$PCT" "$MV"
           cd kernel && git diff --stat | tail -20
 
       - name: Patch GPU OC
         if: ${{ !inputs.scan_only && inputs.gpu_oc }}
+        env:
+          PCT: ${{ inputs.gpu_boost_pct }}
+          MV: ${{ inputs.gpu_volt_mv }}
         run: |
-          python3 patch_opp.py gpu "${{ inputs.gpu_boost_pct }}" "${{ inputs.gpu_volt_mv }}"
+          python3 patch_opp.py gpu "$PCT" "$MV"
           cd kernel && git diff --stat | tail -20
 
       - name: Configure GKI Defconfig
         if: ${{ !inputs.scan_only }}
         run: |
           cd kernel
-          make O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            gki_defconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
 
-          ./scripts/config --file out/.config \
-            -d MODULE_SIG_PROTECT
+          ./scripts/config --file out/.config -d MODULE_SIG_PROTECT
 
-          make O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            olddefconfig
+          if [ "${{ inputs.ksu }}" = "true" ]; then
+            ./scripts/config --file out/.config -e KSU
+            if [ -f ../susfs.flag ]; then
+              ./scripts/config --file out/.config \
+                -e KSU_SUSFS \
+                -e KSU_SUSFS_SUS_PATH \
+                -e KSU_SUSFS_SUS_MOUNT \
+                -e KSU_SUSFS_SUS_KSTAT \
+                -e KSU_SUSFS_SPOOF_UNAME \
+                -e KSU_SUSFS_OPEN_REDIRECT
+            fi
+          fi
+
+          if [ "${{ inputs.bbr }}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e TCP_CONG_ADVANCED \
+              -e TCP_CONG_BBR \
+              -d DEFAULT_CUBIC \
+              -e DEFAULT_BBR \
+              --set-str DEFAULT_TCP_CONG bbr \
+              -e NET_SCH_FQ
+          fi
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+          echo "===== CONFIG CHECK ====="
+          grep -E '^CONFIG_(KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_TCP_CONG)=' out/.config || true
 
       - name: Compile GKI Kernel
         if: ${{ !inputs.scan_only }}
         run: |
+          export CCACHE_DIR="$HOME/.cache/ccache"
+          export CCACHE_MAXSIZE=5G
+          ccache -z
           cd kernel
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            Image
+            CC="ccache clang" \
+            Image 2>&1 | tee ../build.log
+          ccache -s
 
       - name: Verify Kernel Image Output
         if: ${{ !inputs.scan_only }}
@@ -221,24 +324,28 @@ jobs:
           test -s kernel/out/arch/arm64/boot/Image
           echo "===== KERNEL OUTPUT SIZE ====="
           ls -lh kernel/out/arch/arm64/boot/Image
+          strings kernel/out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
 
       - name: Prepare AnyKernel3 Package
         if: ${{ !inputs.scan_only }}
         run: |
           mkdir -p release
+          rm -rf AnyKernel3/.git AnyKernel3/Image* AnyKernel3/ramdisk AnyKernel3/modules 2>/dev/null || true
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
           cat << 'AK3EOF' > AnyKernel3/anykernel.sh
           properties() { '
-          kernel.string=MalachiteOpt GKI 6.1.174 (Universal Malachite)
+          kernel.string=MalachiteOpt GKI 6.1.174 (Malachite)
           do.devicecheck=1
           do.modules=0
-          do.systemless=1
+          do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=malachite
           device.name2=missi
           supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
           '; }
 
           BLOCK=boot;
@@ -248,23 +355,54 @@ jobs:
 
           . tools/ak3-core.sh;
 
-          split_boot;
-          flash_boot;
+          dump_boot;
+          write_boot;
           AK3EOF
 
       - name: Pack AnyKernel3 ZIP
         if: ${{ !inputs.scan_only }}
         run: |
           cd AnyKernel3
-          zip -r9 ../release/MalachiteOpt-GKI-6.1.174.zip . \
+          zip -r9 ../release/${ZIP_NAME}.zip . \
             -x '.git/*' \
             -x 'README.md' \
             -x '*placeholder*'
+          cd ../release
+          sha256sum ${ZIP_NAME}.zip | tee ${ZIP_NAME}.zip.sha256
+          md5sum ${ZIP_NAME}.zip | tee ${ZIP_NAME}.zip.md5
+
+      - name: Upload Build Log
+        if: ${{ always() && !inputs.scan_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload Flashable ZIP Artifact
         if: ${{ !inputs.scan_only }}
         uses: actions/upload-artifact@v4
         with:
-          name: MalachiteOpt-GKI-6.1.174
-          path: release/MalachiteOpt-GKI-6.1.174.zip
+          name: ${{ env.ZIP_NAME }}
+          path: |
+            release/${{ env.ZIP_NAME }}.zip
+            release/${{ env.ZIP_NAME }}.zip.sha256
+            release/${{ env.ZIP_NAME }}.zip.md5
           retention-days: 14
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.scan_only && inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_IN: ${{ inputs.release_tag }}
+        run: |
+          KVER="$(make -C kernel -s kernelversion)"
+          TAG="${TAG_IN:-v${KVER}-$(date +%Y%m%d-%H%M)}"
+          gh release create "$TAG" \
+            release/${ZIP_NAME}.zip \
+            release/${ZIP_NAME}.zip.sha256 \
+            release/${ZIP_NAME}.zip.md5 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "MalachiteOpt GKI ${KVER}" \
+            --notes "Kernel GKI ${KVER} untuk Poco X7 (malachite). KSU-Next: ${{ inputs.ksu }}, SUSFS: ${{ inputs.susfs }}, BBR: ${{ inputs.bbr }}. Flash lewat KernelSU manager / recovery. Verifikasi dengan file .sha256."
