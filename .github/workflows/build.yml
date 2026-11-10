@@ -1,252 +1,112 @@
-name: YannzProject - Malachite GKI 6.1.174
+name: Malachite GKI 6.1 Build
 
 on:
   workflow_dispatch:
-    inputs:
-      root_solution:
-        description: "Root Solution"
-        type: choice
-        options:
-          - none
-          - ksunext
-          - sukisu
-        default: ksunext
-      enable_bbrv3:
-        description: "Enable BBRv3 (built-in)"
-        type: boolean
-        default: true
-      enable_zram_opt:
-        description: "Enable ZRAM Optimizations"
-        type: boolean
-        default: true
-      enable_networking_opt:
-        description: "Enable FQ_Codel + CAKE"
-        type: boolean
-        default: true
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build GKI 6.1.174 + AnyKernel3
+    name: Build Malachite GKI
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Kernel Source (Branch main)
+      - name: Checkout kernel
         uses: actions/checkout@v4
         with:
-          ref: main
           path: kernel
 
-      - name: Install Build Dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential flex \
-            git curl wget zip unzip zstd \
+            git curl wget zip unzip \
             libssl-dev libelf-dev \
             python3 python3-pip \
-            pahole lz4 \
-            device-tree-compiler \
-            rsync ccache
+            clang llvm lld pahole \
+            device-tree-compiler rsync \
+            binutils
 
-      # ====================== Clang Neutron 23 ======================
-      - name: Setup Neutron Clang 23
+          # Pastikan ld.lld tersedia
+          if ! command -v ld.lld >/dev/null 2>&1; then
+            if command -v ld.lld-18 >/dev/null 2>&1; then
+              sudo ln -sf "$(command -v ld.lld-18)" /usr/bin/ld.lld
+            elif command -v ld.lld-17 >/dev/null 2>&1; then
+              sudo ln -sf "$(command -v ld.lld-17)" /usr/bin/ld.lld
+            elif command -v ld.lld-16 >/dev/null 2>&1; then
+              sudo ln -sf "$(command -v ld.lld-16)" /usr/bin/ld.lld
+            else
+              echo "ERROR: ld.lld not found after installing lld"
+              ls -l /usr/bin/ld* || true
+              exit 1
+            fi
+          fi
+
+          echo "=== Toolchain check ==="
+          command -v clang
+          command -v ld.lld
+          ld.lld --version | head -n1
+          clang --version | head -n1
+
+      - name: Clone Malachite device tree
         run: |
-          echo "===== Downloading Neutron Clang 23 ====="
-          mkdir -p $HOME/clang
-          cd $HOME/clang
+          git clone --depth=1 \
+            https://github.com/malachite-project/android_device_xiaomi_malachite.git \
+            device_tree
 
-          # Clang 23.0.0git (tag 30062026)
-          curl -L -o neutron-clang.tar.zst \
-            https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/30062026/neutron-clang-30062026.tar.zst
-
-          tar --use-compress-program=unzstd -xf neutron-clang.tar.zst
-          rm -f neutron-clang.tar.zst
-
-          CLANG_BIN=$(find $HOME/clang -type f -name clang | head -n1)
-          CLANG_DIR=$(dirname $(dirname "$CLANG_BIN"))
-          echo "CLANG_DIR=$CLANG_DIR" >> $GITHUB_ENV
-          echo "PATH=$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
-
-          echo "===== Clang Version ====="
-          $CLANG_DIR/bin/clang --version
-
-      - name: Clone AnyKernel3
+      - name: Check sources
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-
-      - name: Verify Kernel Version
-        run: |
+          echo "===== KERNEL ====="
           cd kernel
-          echo "===== KERNEL VERSION ====="
           make -s kernelversion
           git log -1 --oneline
 
-      # ====================== Root Solution ======================
-      - name: Setup KernelSU-Next
-        if: ${{ inputs.root_solution == 'ksunext' }}
-        run: |
-          cd kernel
-          echo "===== Integrating KernelSU-Next ====="
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
-          echo "KernelSU-Next integrated"
+          echo "===== DEFCONFIG ====="
+          find arch/arm64/configs -name '*defconfig'
 
-      - name: Setup SukiSU-Ultra
-        if: ${{ inputs.root_solution == 'sukisu' }}
-        run: |
-          cd kernel
-          echo "===== Integrating SukiSU-Ultra ====="
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
-          echo "SukiSU-Ultra integrated"
-
-      # ====================== BBRv3 ======================
-      - name: Apply BBRv3 Patch
-        if: ${{ inputs.enable_bbrv3 }}
-        run: |
-          cd kernel
-          echo "===== Applying BBRv3 Patch (android14-6.1) ====="
-          curl -sL -o /tmp/bbrv3.patch \
-            https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/bbrv3/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch
-
-          if patch -p1 --dry-run -F3 < /tmp/bbrv3.patch > /dev/null 2>&1; then
-            patch -p1 -F3 < /tmp/bbrv3.patch
-            echo "BBRv3 patch applied successfully"
-          else
-            echo "WARNING: BBRv3 patch failed to apply cleanly. Falling back to stock BBR."
-          fi
+          echo "===== DEVICE TREE ====="
+          cd ../device_tree
+          git log -1 --oneline
+          find . -maxdepth 3 -type f | head -100
 
       - name: Configure GKI Defconfig
         run: |
           cd kernel
-          make O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            gki_defconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
 
-          ./scripts/config --file out/.config \
-            -d MODULE_SIG_PROTECT
-
-          # ===== BBRv3 / BBR =====
-          if [ "${{ inputs.enable_bbrv3 }}" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e CONFIG_TCP_CONG_BBR \
-              -e CONFIG_DEFAULT_BBR \
-              -d CONFIG_DEFAULT_CUBIC || true
-            ./scripts/config --file out/.config \
-              -e CONFIG_TCP_CONG_BBR3 2>/dev/null || true
-          fi
-
-          # ===== Networking (FQ_Codel + CAKE) =====
-          if [ "${{ inputs.enable_networking_opt }}" = "true" ]; then
-            echo "===== Enabling FQ_Codel + CAKE ====="
-            ./scripts/config --file out/.config \
-              -e CONFIG_NET_SCH_FQ_CODEL \
-              -e CONFIG_NET_SCH_CAKE \
-              -e CONFIG_NET_SCH_FQ \
-              -e CONFIG_IP_ADVANCED_ROUTER \
-              -e CONFIG_IP_MULTIPLE_TABLES || true
-          fi
-
-          # ===== ZRAM Optimizations =====
-          if [ "${{ inputs.enable_zram_opt }}" = "true" ]; then
-            echo "===== Enabling ZRAM Optimizations ====="
-            ./scripts/config --file out/.config \
-              -e CONFIG_ZRAM \
-              -e CONFIG_ZRAM_WRITEBACK \
-              -e CONFIG_ZRAM_MEMORY_TRACKING \
-              -e CONFIG_CRYPTO_LZ4 \
-              -e CONFIG_CRYPTO_LZ4HC \
-              -e CONFIG_CRYPTO_ZSTD \
-              -e CONFIG_ZSWAP \
-              -e CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4 || true
-          fi
-
-          make O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            olddefconfig
-
-      - name: Compile GKI Kernel
+      - name: Build kernel
         run: |
           cd kernel
-          export PATH="${CLANG_DIR}/bin:$PATH"
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            STRIP=llvm-strip \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            READELF=llvm-readelf \
-            HOSTCC=clang \
-            HOSTCXX=clang++ \
-            Image
+            Image.gz \
+            dtbs \
+            modules
 
-      - name: Verify Kernel Image Output
+      - name: Verify output
         run: |
-          test -s kernel/out/arch/arm64/boot/Image
-          echo "===== KERNEL OUTPUT SIZE ====="
-          ls -lh kernel/out/arch/arm64/boot/Image
+          cd kernel
+          test -s out/arch/arm64/boot/Image.gz
+          find out/arch/arm64/boot -type f
+          ls -lh out/arch/arm64/boot/Image.gz
 
-      - name: Prepare AnyKernel3 Package
+      - name: Package kernel
         run: |
           mkdir -p release
-          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+          cp kernel/out/arch/arm64/boot/Image.gz release/
 
-          FEATURES=""
-          case "${{ inputs.root_solution }}" in
-            ksunext) FEATURES="$FEATURES + KSUN" ;;
-            sukisu)  FEATURES="$FEATURES + SukiSU" ;;
-          esac
-          [ "${{ inputs.enable_bbrv3 }}" = "true" ] && FEATURES="$FEATURES + BBRv3"
-          [ "${{ inputs.enable_zram_opt }}" = "true" ] && FEATURES="$FEATURES + ZRAM"
-          [ "${{ inputs.enable_networking_opt }}" = "true" ] && FEATURES="$FEATURES + FQ_Codel"
+          cd release
+          zip -r Malachite-GKI-6.1.zip .
 
-          cat << AK3EOF > AnyKernel3/anykernel.sh
-          properties() { '
-          kernel.string=YannzProject GKI 6.1.174 (Universal Malachite$FEATURES)
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=malachite
-          device.name2=missi
-          supported.versions=
-          '; }
-
-          BLOCK=boot;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-
-          . tools/ak3-core.sh;
-
-          split_boot;
-          flash_boot;
-          AK3EOF
-
-      - name: Pack AnyKernel3 ZIP
-        run: |
-          cd AnyKernel3
-          zip -r9 ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
-            -x '.git/*' \
-            -x 'README.md' \
-            -x '*placeholder*'
-
-      - name: Upload Flashable ZIP Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: YannzProject-Malachite-GKI-6.1.174
-          path: release/YannzProject-Malachite-GKI-6.1.174.zip
+          name: Malachite-GKI-6.1
+          path: release/Malachite-GKI-6.1.zip
           retention-days: 14
