@@ -3,8 +3,24 @@ name: YannzProject - Malachite GKI 6.1.174
 on:
   workflow_dispatch:
     inputs:
+      root_solution:
+        description: "Root Solution"
+        type: choice
+        options:
+          - none
+          - ksunext
+          - sukisu
+        default: ksunext
       enable_bbrv3:
         description: "Enable BBRv3 (built-in)"
+        type: boolean
+        default: true
+      enable_zram_opt:
+        description: "Enable ZRAM Optimizations"
+        type: boolean
+        default: true
+      enable_networking_opt:
+        description: "Enable FQ_Codel + CAKE"
         type: boolean
         default: true
 
@@ -29,13 +45,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential flex \
-            git curl wget zip unzip \
+            git curl wget zip unzip zstd \
             libssl-dev libelf-dev \
             python3 python3-pip \
-            clang llvm lld \
             pahole lz4 \
             device-tree-compiler \
             rsync ccache
+
+      # ====================== Clang Neutron 23 ======================
+      - name: Setup Neutron Clang 23
+        run: |
+          echo "===== Downloading Neutron Clang 23 ====="
+          mkdir -p $HOME/clang
+          cd $HOME/clang
+
+          # Clang 23.0.0git (tag 30062026)
+          curl -L -o neutron-clang.tar.zst \
+            https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/30062026/neutron-clang-30062026.tar.zst
+
+          tar --use-compress-program=unzstd -xf neutron-clang.tar.zst
+          rm -f neutron-clang.tar.zst
+
+          CLANG_BIN=$(find $HOME/clang -type f -name clang | head -n1)
+          CLANG_DIR=$(dirname $(dirname "$CLANG_BIN"))
+          echo "CLANG_DIR=$CLANG_DIR" >> $GITHUB_ENV
+          echo "PATH=$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
+
+          echo "===== Clang Version ====="
+          $CLANG_DIR/bin/clang --version
 
       - name: Clone AnyKernel3
         run: |
@@ -47,6 +84,23 @@ jobs:
           echo "===== KERNEL VERSION ====="
           make -s kernelversion
           git log -1 --oneline
+
+      # ====================== Root Solution ======================
+      - name: Setup KernelSU-Next
+        if: ${{ inputs.root_solution == 'ksunext' }}
+        run: |
+          cd kernel
+          echo "===== Integrating KernelSU-Next ====="
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          echo "KernelSU-Next integrated"
+
+      - name: Setup SukiSU-Ultra
+        if: ${{ inputs.root_solution == 'sukisu' }}
+        run: |
+          cd kernel
+          echo "===== Integrating SukiSU-Ultra ====="
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          echo "SukiSU-Ultra integrated"
 
       # ====================== BBRv3 ======================
       - name: Apply BBRv3 Patch
@@ -61,7 +115,7 @@ jobs:
             patch -p1 -F3 < /tmp/bbrv3.patch
             echo "BBRv3 patch applied successfully"
           else
-            echo "WARNING: BBRv3 patch failed to apply cleanly. Falling back to enable stock BBR only."
+            echo "WARNING: BBRv3 patch failed to apply cleanly. Falling back to stock BBR."
           fi
 
       - name: Configure GKI Defconfig
@@ -76,16 +130,39 @@ jobs:
           ./scripts/config --file out/.config \
             -d MODULE_SIG_PROTECT
 
-          # BBRv3 / BBR config
+          # ===== BBRv3 / BBR =====
           if [ "${{ inputs.enable_bbrv3 }}" = "true" ]; then
             ./scripts/config --file out/.config \
               -e CONFIG_TCP_CONG_BBR \
               -e CONFIG_DEFAULT_BBR \
               -d CONFIG_DEFAULT_CUBIC || true
-
-            # Kalau patch BBRv3 berhasil membuat CONFIG_TCP_CONG_BBR3
             ./scripts/config --file out/.config \
               -e CONFIG_TCP_CONG_BBR3 2>/dev/null || true
+          fi
+
+          # ===== Networking (FQ_Codel + CAKE) =====
+          if [ "${{ inputs.enable_networking_opt }}" = "true" ]; then
+            echo "===== Enabling FQ_Codel + CAKE ====="
+            ./scripts/config --file out/.config \
+              -e CONFIG_NET_SCH_FQ_CODEL \
+              -e CONFIG_NET_SCH_CAKE \
+              -e CONFIG_NET_SCH_FQ \
+              -e CONFIG_IP_ADVANCED_ROUTER \
+              -e CONFIG_IP_MULTIPLE_TABLES || true
+          fi
+
+          # ===== ZRAM Optimizations =====
+          if [ "${{ inputs.enable_zram_opt }}" = "true" ]; then
+            echo "===== Enabling ZRAM Optimizations ====="
+            ./scripts/config --file out/.config \
+              -e CONFIG_ZRAM \
+              -e CONFIG_ZRAM_WRITEBACK \
+              -e CONFIG_ZRAM_MEMORY_TRACKING \
+              -e CONFIG_CRYPTO_LZ4 \
+              -e CONFIG_CRYPTO_LZ4HC \
+              -e CONFIG_CRYPTO_ZSTD \
+              -e CONFIG_ZSWAP \
+              -e CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4 || true
           fi
 
           make O=out \
@@ -97,11 +174,22 @@ jobs:
       - name: Compile GKI Kernel
         run: |
           cd kernel
+          export PATH="${CLANG_DIR}/bin:$PATH"
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
             Image
 
       - name: Verify Kernel Image Output
@@ -116,7 +204,13 @@ jobs:
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
           FEATURES=""
+          case "${{ inputs.root_solution }}" in
+            ksunext) FEATURES="$FEATURES + KSUN" ;;
+            sukisu)  FEATURES="$FEATURES + SukiSU" ;;
+          esac
           [ "${{ inputs.enable_bbrv3 }}" = "true" ] && FEATURES="$FEATURES + BBRv3"
+          [ "${{ inputs.enable_zram_opt }}" = "true" ] && FEATURES="$FEATURES + ZRAM"
+          [ "${{ inputs.enable_networking_opt }}" = "true" ] && FEATURES="$FEATURES + FQ_Codel"
 
           cat << AK3EOF > AnyKernel3/anykernel.sh
           properties() { '
