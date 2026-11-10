@@ -1,655 +1,270 @@
-
 name: MalachiteOpt - GKI 6.1.174
 
 on:
   workflow_dispatch:
     inputs:
-      bbrv3:
-        description: "Enable BBRv3 backport"
+      scan_only:
+        description: "Hanya scan tabel GPU OPP (tanpa compile kernel)"
         type: boolean
-        required: true
-        default: true
-
-      thin_lto:
-        description: "Enable ThinLTO"
+        default: false
+      cpu_oc:
+        description: "Aktifkan CPU overclock"
         type: boolean
-        required: true
-        default: true
-
-      zram_lz4:
-        description: "Enable ZRAM LZ4"
+        default: false
+      cpu_boost_pct:
+        description: "CPU: naik berapa % dari frekuensi OPP tertinggi"
+        type: string
+        default: "5"
+      cpu_volt_mv:
+        description: "CPU: tambah voltase (mV), 0 = tidak diubah"
+        type: string
+        default: "0"
+      gpu_oc:
+        description: "Aktifkan GPU overclock"
         type: boolean
-        required: true
-        default: true
-
-      rekernel_audit:
-        description: "Audit Re:Kernel compatibility"
-        type: boolean
-        required: true
-        default: true
-
-      build_modules:
-        description: "Build kernel modules for inspection"
-        type: boolean
-        required: true
-        default: true
+        default: false
+      gpu_boost_pct:
+        description: "GPU: naik berapa % dari frekuensi OPP tertinggi"
+        type: string
+        default: "5"
+      gpu_volt_mv:
+        description: "GPU: tambah voltase (mV), 0 = tidak diubah"
+        type: string
+        default: "0"
 
 permissions:
   contents: read
 
-concurrency:
-  group: malachiteopt-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
-    name: MalachiteOpt GKI 6.1.174
-    runs-on: ubuntu-22.04
-    timeout-minutes: 240
-
-    env:
-      ARCH: arm64
-      SUBARCH: arm64
-      KERNEL_DIR: kernel
-      OUT_DIR: out
-      TC_DIR: /home/runner/toolchains/neutron-clang
-      NEUTRON_TAG: "17062026"
-      EXPECTED_KERNEL_VERSION: "6.1.174"
-      AK3_DIR: AnyKernel3
+    name: Build MalachiteOpt GKI 6.1.174 + AnyKernel3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
 
     steps:
-      # --------------------------------------------------
-      # 1. CHECKOUT KERNEL SOURCE
-      # --------------------------------------------------
-      - name: Checkout Kernel Source
+      - name: Checkout Kernel Source (Branch main)
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
           path: kernel
 
-      # --------------------------------------------------
-      # 2. INSTALL BUILD DEPENDENCIES
-      # --------------------------------------------------
-      - name: Install Dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            ca-certificates \
-            ccache \
-            clang \
-            curl \
-            flex \
-            git \
-            libelf-dev \
-            libssl-dev \
-            lld \
-            llvm \
-            lz4 \
-            python3 \
-            python3-pip \
-            rsync \
-            unzip \
-            zip \
-            zstd \
-            dwarves \
+            bc bison build-essential flex \
+            git curl wget zip unzip \
+            libssl-dev libelf-dev \
+            python3 python3-pip \
+            clang llvm lld \
+            pahole lz4 \
             device-tree-compiler \
-            gcc-aarch64-linux-gnu
+            rsync ccache
 
-      # --------------------------------------------------
-      # 3. INSTALL NEUTRON CLANG 23
-      # --------------------------------------------------
-      - name: Install Neutron Clang 23
+      - name: Clone AnyKernel3
         run: |
-          mkdir -p "$HOME/toolchains"
-          mkdir -p "$TC_DIR"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-          cd "$HOME"
-
-          curl -fLSs \
-            https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman \
-            -o antman
-
-          chmod +x antman
-
-          ./antman -S="$NEUTRON_TAG"
-
-          if [ -x "$TC_DIR/bin/clang" ]; then
-            echo "$TC_DIR/bin" >> "$GITHUB_PATH"
-          else
-            echo "Neutron Clang not found at $TC_DIR/bin"
-            find "$HOME/toolchains" -maxdepth 4 -name clang
-            exit 1
-          fi
-
-      - name: Verify Neutron Compiler
+      - name: Verify Kernel Version
         run: |
-          export PATH="$TC_DIR/bin:$PATH"
+          cd kernel
+          echo "===== KERNEL VERSION ====="
+          make -s kernelversion
+          git log -1 --oneline
 
-          clang --version
-
-          clang --version | grep -q "23.0.0" || {
-            echo "Expected Neutron Clang 23"
-            exit 1
-          }
-
-          ld.lld --version
-          llvm-ar --version
-
-      # --------------------------------------------------
-      # 4. CHECK KERNEL VERSION
-      # --------------------------------------------------
-      - name: Verify Kernel Source
-        working-directory: kernel
+      - name: Find GPU OPP table
         run: |
-          VERSION=$(make -s kernelversion)
-
-          echo "Detected kernel: $VERSION"
-
-          if [ "$VERSION" != "$EXPECTED_KERNEL_VERSION" ]; then
-            echo "Kernel version mismatch!"
-            exit 1
-          fi
-
-          echo "Kernel version verified."
-
-      # --------------------------------------------------
-      # 5. APPLY BBRv3 BACKPORT
-      # --------------------------------------------------
-      - name: Apply BBRv3 Android 6.1 Patch
-        if: ${{ inputs.bbrv3 }}
-        working-directory: kernel
-        run: |
-          set -e
-
-          PATCH_DIR="$RUNNER_TEMP/kernel_patches"
-          PATCH_FILE="$PATCH_DIR/0001-bbrv3-android14-6.1.patch"
-
-          mkdir -p "$PATCH_DIR"
-
-          curl -fL \
-            "https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/bbrv3/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch" \
-            -o "$PATCH_FILE"
-
-          echo "===== PATCH INFORMATION ====="
-          wc -l "$PATCH_FILE"
-          head -n 20 "$PATCH_FILE"
-
-          echo "===== CHECK PATCH ====="
-
-          # Ignore whitespace warnings only.
-          # Context and source compatibility are still checked.
-          git apply \
-            --check \
-            --whitespace=nowarn \
-            "$PATCH_FILE"
-
-          echo "===== APPLY PATCH ====="
-
-          git apply \
-            --whitespace=nowarn \
-            "$PATCH_FILE"
-
-          echo "===== VERIFY PATCH FILES ====="
-
-          test -f net/ipv4/tcp_bbr3.c
-          test -f net/ipv4/tcp_plb.c
-
-          grep -R "TCP_CONG_BBR3" \
-            net/ipv4 Kconfig* include/net || true
-
-          echo "BBRv3 backport applied successfully."
-
-      # --------------------------------------------------
-      # 6. AUDIT RE-KERNEL
-      # --------------------------------------------------
-      - name: Re-Kernel Compatibility Audit
-        if: ${{ inputs.rekernel_audit }}
-        run: |
-          set -e
-
-          git clone --depth=1 \
-            https://github.com/Sakion-Team/Re-Kernel.git \
-            re-kernel
-
-          mkdir -p audit
-
+          cd kernel
           {
-            echo "=================================="
-            echo "MalachiteOpt Re-Kernel Audit"
-            echo "=================================="
-            echo ""
+            echo "===== GPUFREQ FILES ====="
+            find . -ipath '*gpufreq*' \( -name '*.c' -o -name '*.h' \) | head -30
+            echo
+            echo "===== OPP TABLE ====="
+            grep -rIn --include='*.c' --include='*.h' \
+              -E 'g_default_gpu|g_opp_table|GPU_OPP' . | head -30
+            echo
+            echo "===== MALI / GED ====="
+            find . -maxdepth 4 -type d \( -iname '*mali*' -o -iname '*ged*' \) | head -20
+            echo
+            echo "===== DTS GPU OPP ====="
+            grep -rIln --include='*.dts' --include='*.dtsi' \
+              -E 'gpu.*opp|opp.*gpu' . | head -20
+          } 2>&1 | tee ../gpu-scan.txt
 
-            echo "Device: malachite / missi"
-            echo "Kernel: 6.1.174"
-            echo ""
+      - name: Upload GPU scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-scan-report
+          path: gpu-scan.txt
+          retention-days: 7
 
-            echo "===== README INTEGRATION GUIDE ====="
-
-            grep -n -i -A 8 -B 4 \
-              "Magisk\|manual\|5.10\|GKI" \
-              re-kernel/README.md || true
-
-            echo ""
-            echo "===== DEVICE SUPPORT SEARCH ====="
-
-            if [ -d re-kernel/Supports ]; then
-              grep -RinE "malachite|missi" \
-                re-kernel/Supports || true
-            else
-              echo "No Supports directory found."
-            fi
-
-            echo ""
-            echo "===== RE-KERNEL FILES ====="
-
-            find re-kernel -maxdepth 2 -type f \
-              | head -100
-
-            echo ""
-            echo "===== AUDIT CONCLUSION ====="
-            echo "This is an informational source audit."
-            echo "No Re-Kernel source was injected into the kernel."
-            echo "GKI 6.1 compatibility must be tested separately."
-
-          } > audit/rekernel-audit.txt
-
-          cat audit/rekernel-audit.txt
-
-      # --------------------------------------------------
-      # 7. CONFIGURE GKI DEFCONFIG
-      # --------------------------------------------------
-      - name: Configure GKI Defconfig
-        working-directory: kernel
+      - name: Write OPP patch script
+        if: ${{ !inputs.scan_only && (inputs.cpu_oc || inputs.gpu_oc) }}
         run: |
-          set -e
+          cat << 'PYEOF' > patch_opp.py
+          import re, sys, pathlib
 
-          export PATH="$TC_DIR/bin:$PATH"
+          kind = sys.argv[1]
+          pct = float(sys.argv[2])
+          mv = int(sys.argv[3])
+          patched = 0
 
-          make O="$OUT_DIR" \
+          for path in pathlib.Path("kernel").rglob("*.dts*"):
+              if path.suffix not in (".dts", ".dtsi"):
+                  continue
+              try:
+                  t = path.read_text()
+              except Exception:
+                  continue
+              if "opp-hz" not in t:
+                  continue
+
+              st, blocks = [], []
+              for m in re.finditer(r"[{}]", t):
+                  if m.group() == "{":
+                      st.append(m.start())
+                  elif st:
+                      blocks.append((st.pop(), m.start()))
+
+              leafs = [(s, e) for s, e in blocks
+                       if "{" not in t[s + 1:e] and "opp-hz" in t[s:e]]
+              qual = [(s, e) for s, e in blocks
+                      if "operating-points-v2" in t[s:e]
+                      and any(s < a and b < e for a, b in leafs)]
+              tables = [b for b in qual
+                        if not any(o != b and b[0] < o[0] and o[1] < b[1] for o in qual)]
+
+              edits = []
+              for s, e in tables:
+                  hdr = t[max(t.rfind(c, 0, s) for c in ";{}") + 1:s]
+                  if kind not in str(path).lower() and kind not in hdr.lower():
+                      continue
+                  mine = [(a, b) for a, b in leafs if s < a and b < e]
+                  best = None
+                  for a, b in mine:
+                      m = re.search(r"opp-hz\s*=\s*(?:/bits/\s*64\s*)?<([^>]*)>", t[a:b])
+                      if not m:
+                          continue
+                      nums = m.group(1).split()
+                      val = int(nums[-1], 0)
+                      if best is None or val > best[0]:
+                          best = (val, a, b, m, nums)
+                  if best is None:
+                      continue
+                  val, a, b, m, nums = best
+                  new = int(round(val * (1 + pct / 100.0) / 1e6)) * 1000000
+                  edits.append((a + m.start(1), a + m.end(1), " ".join(nums[:-1] + [str(new)])))
+                  if mv:
+                      v = re.search(r"opp-microvolt\s*=\s*<([^>]*)>", t[a:b])
+                      if v:
+                          vn = [str(int(x, 0) + mv * 1000) for x in v.group(1).split()]
+                          edits.append((a + v.start(1), a + v.end(1), " ".join(vn)))
+                  print(f"PATCHED {path}: {val} -> {new} Hz (+{mv} mV)")
+                  patched += 1
+
+              if edits:
+                  for s0, e0, txt in sorted(edits, reverse=True):
+                      t = t[:s0] + txt + t[e0:]
+                  path.write_text(t)
+
+          print(f"TOTAL {kind} OPP tables patched: {patched}")
+          if patched == 0:
+              print(f"::warning::Tidak ada tabel OPP {kind} di DTS source. "
+                    f"OC {kind} tidak diterapkan (kemungkinan di firmware / modul vendor).")
+          PYEOF
+
+      - name: Patch CPU OC
+        if: ${{ !inputs.scan_only && inputs.cpu_oc }}
+        run: |
+          python3 patch_opp.py cpu "${{ inputs.cpu_boost_pct }}" "${{ inputs.cpu_volt_mv }}"
+          cd kernel && git diff --stat | tail -20
+
+      - name: Patch GPU OC
+        if: ${{ !inputs.scan_only && inputs.gpu_oc }}
+        run: |
+          python3 patch_opp.py gpu "${{ inputs.gpu_boost_pct }}" "${{ inputs.gpu_volt_mv }}"
+          cd kernel && git diff --stat | tail -20
+
+      - name: Configure GKI Defconfig
+        if: ${{ !inputs.scan_only }}
+        run: |
+          cd kernel
+          make O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             gki_defconfig
 
-          echo "GKI defconfig generated."
+          ./scripts/config --file out/.config \
+            -d MODULE_SIG_PROTECT
 
-      # --------------------------------------------------
-      # 8. MALACHITEOPT CONFIGURATION
-      # --------------------------------------------------
-      - name: Apply MalachiteOpt Configuration
-        working-directory: kernel
-        run: |
-          set -e
-
-          CFG="$OUT_DIR/.config"
-
-          CONFIG_TOOL="scripts/config"
-
-          # ----------------------------------------------
-          # THINLTO
-          # ----------------------------------------------
-          if [ "${{ inputs.thin_lto }}" = "true" ]; then
-            $CONFIG_TOOL --file "$CFG" \
-              --enable LTO \
-              --enable LTO_CLANG \
-              --enable LTO_CLANG_THIN
-          fi
-
-          # ----------------------------------------------
-          # BBRv3
-          # ----------------------------------------------
-          if [ "${{ inputs.bbrv3 }}" = "true" ]; then
-            $CONFIG_TOOL --file "$CFG" \
-              --enable TCP_CONG_BBR3 \
-              --enable NET_SCH_FQ
-          fi
-
-          # ----------------------------------------------
-          # ZRAM LZ4
-          # ----------------------------------------------
-          if [ "${{ inputs.zram_lz4 }}" = "true" ]; then
-            $CONFIG_TOOL --file "$CFG" \
-              --enable ZRAM \
-              --enable ZRAM_DEF_COMP_LZ4 \
-              --enable LZ4_COMPRESS \
-              --enable LZ4_DECOMPRESS
-          fi
-
-          # ----------------------------------------------
-          # MEMORY / PRESSURE SUPPORT
-          # ----------------------------------------------
-          $CONFIG_TOOL --file "$CFG" \
-            --enable PSI \
-            --enable PSI_DEFAULT_DISABLED \
-            --enable ZSMALLOC
-
-          # ----------------------------------------------
-          # POWER EFFICIENCY
-          # ----------------------------------------------
-          $CONFIG_TOOL --file "$CFG" \
-            --enable CPU_IDLE \
-            --enable PM \
-            --enable PM_SLEEP \
-            --enable WQ_POWER_EFFICIENT_DEFAULT
-
-          # ----------------------------------------------
-          # NO BORE
-          # ----------------------------------------------
-          $CONFIG_TOOL --file "$CFG" \
-            --disable SCHED_BORE
-
-          # Resolve dependencies.
-          make O="$OUT_DIR" \
+          make O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             olddefconfig
 
-          echo "===== CONFIG VERIFICATION ====="
-
-          grep -E \
-            "CONFIG_(LTO|LTO_CLANG|LTO_CLANG_THIN|TCP_CONG_BBR3|NET_SCH_FQ|ZRAM|ZRAM_DEF_COMP_LZ4|PSI|CPU_IDLE|WQ_POWER_EFFICIENT_DEFAULT|SCHED_BORE)=" \
-            "$CFG" || true
-
-          # ----------------------------------------------
-          # ASSERT SELECTED OPTIONS
-          # ----------------------------------------------
-          if [ "${{ inputs.thin_lto }}" = "true" ]; then
-            grep -q '^CONFIG_LTO_CLANG_THIN=y$' "$CFG" || {
-              echo "ThinLTO is unavailable or disabled by dependencies."
-              exit 1
-            }
-          fi
-
-          if [ "${{ inputs.bbrv3 }}" = "true" ]; then
-            grep -q '^CONFIG_TCP_CONG_BBR3=y$' "$CFG" || {
-              echo "BBRv3 config is missing."
-              exit 1
-            }
-
-            grep -q '^CONFIG_NET_SCH_FQ=y$' "$CFG" || {
-              echo "FQ scheduler is missing."
-              exit 1
-            }
-          fi
-
-          if [ "${{ inputs.zram_lz4 }}" = "true" ]; then
-            grep -q '^CONFIG_ZRAM=y$' "$CFG" || {
-              echo "ZRAM is missing."
-              exit 1
-            }
-
-            grep -q '^CONFIG_ZRAM_DEF_COMP_LZ4=y$' "$CFG" || {
-              echo "ZRAM LZ4 is unavailable in this source."
-              exit 1
-            }
-          fi
-
-          if grep -q '^CONFIG_SCHED_BORE=y$' "$CFG"; then
-            echo "BORE must remain disabled."
-            exit 1
-          fi
-
-          cp "$CFG" ../kernel-config.txt
-
-      # --------------------------------------------------
-      # 9. BUILD KERNEL
-      # --------------------------------------------------
-      - name: Compile MalachiteOpt Kernel
-        working-directory: kernel
+      - name: Compile GKI Kernel
+        if: ${{ !inputs.scan_only }}
         run: |
-          set -e
-
-          export PATH="$TC_DIR/bin:$PATH"
-
-          BUILD_TARGETS="Image"
-
-          if [ "${{ inputs.build_modules }}" = "true" ]; then
-            BUILD_TARGETS="Image modules"
-          fi
-
+          cd kernel
           make -j"$(nproc)" \
-            O="$OUT_DIR" \
+            O=out \
             ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            $BUILD_TARGETS
+            Image
 
-      # --------------------------------------------------
-      # 10. VERIFY BBRv3 COMPILATION
-      # --------------------------------------------------
-      - name: Verify BBRv3 Compilation
-        if: ${{ inputs.bbrv3 }}
-        working-directory: kernel
+      - name: Verify Kernel Image Output
+        if: ${{ !inputs.scan_only }}
         run: |
-          set -e
+          test -s kernel/out/arch/arm64/boot/Image
+          echo "===== KERNEL OUTPUT SIZE ====="
+          ls -lh kernel/out/arch/arm64/boot/Image
 
-          echo "===== BBRv3 SOURCE ====="
-
-          test -f net/ipv4/tcp_bbr3.c
-          test -f net/ipv4/tcp_plb.c
-
-          echo "===== BBRv3 OBJECT ====="
-
-          find "$OUT_DIR" \
-            -type f \
-            \( -name "tcp_bbr3.o" -o -name "tcp_plb.o" \) \
-            -print
-
-          test -f "$OUT_DIR/net/ipv4/tcp_bbr3.o"
-          test -f "$OUT_DIR/net/ipv4/tcp_plb.o"
-
-          echo "BBRv3 and TCP PLB compiled successfully."
-
-      # --------------------------------------------------
-      # 11. VERIFY KERNEL OUTPUT
-      # --------------------------------------------------
-      - name: Verify Kernel Output
-        working-directory: kernel
+      - name: Prepare AnyKernel3 Package
+        if: ${{ !inputs.scan_only }}
         run: |
-          set -e
+          mkdir -p release
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
-          IMAGE="$OUT_DIR/arch/arm64/boot/Image"
+          cat << 'AK3EOF' > AnyKernel3/anykernel.sh
+          properties() { '
+          kernel.string=MalachiteOpt GKI 6.1.174 (Universal Malachite)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=malachite
+          device.name2=missi
+          supported.versions=
+          '; }
 
-          test -s "$IMAGE"
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
-          echo "===== KERNEL IMAGE ====="
-          ls -lh "$IMAGE"
-          file "$IMAGE"
+          . tools/ak3-core.sh;
 
-          echo "===== VMLINUX ====="
-          test -s "$OUT_DIR/vmlinux"
-          ls -lh "$OUT_DIR/vmlinux"
+          split_boot;
+          flash_boot;
+          AK3EOF
 
-          echo "===== MODULE SYMBOLS ====="
-          if [ -f "$OUT_DIR/Module.symvers" ]; then
-            ls -lh "$OUT_DIR/Module.symvers"
-          fi
-
-          echo "Kernel output verified."
-
-      # --------------------------------------------------
-      # 12. PREPARE ANYKERNEL3
-      # --------------------------------------------------
-      - name: Prepare AnyKernel3
-        run: |
-          set -e
-
-          git clone --depth=1 \
-            https://github.com/osm0sis/AnyKernel3.git \
-            "$AK3_DIR"
-
-          cp kernel/out/arch/arm64/boot/Image \
-            "$AK3_DIR/Image"
-
-          # Keep the package focused on the kernel image.
-          # Do not replace vendor Wi-Fi/Bluetooth modules.
-
-          echo "===== ANYKERNEL3 FILES ====="
-          ls -la "$AK3_DIR"
-
-          test -s "$AK3_DIR/Image"
-          test -f "$AK3_DIR/anykernel.sh"
-
-      # --------------------------------------------------
-      # 13. CONFIGURE ANYKERNEL3
-      # --------------------------------------------------
-      - name: Configure AnyKernel3
-        working-directory: AnyKernel3
-        run: |
-          set -e
-
-          cat > anykernel.sh <<'EOF'
-          # AnyKernel3 - MalachiteOpt
-          # Device: POCO X7 / Redmi Note 14 Pro 5G
-          # Codename: malachite / missi
-          # Kernel: GKI 6.1.174
-
-          properties() {
-            do.devicecheck=1
-            do.modules=0
-            do.systemless=1
-            do.cleanup=1
-            do.cleanuponabort=0
-
-            device.name1=malachite
-            device.name2=missi
-
-            block=boot
-            is_slot_device=auto
-            ramdisk_compression=auto
-            patch_vbmeta_flag=auto
-          }
-
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          EOF
-
-          echo "AnyKernel3 configured."
-          cat anykernel.sh
-
-      # --------------------------------------------------
-      # 14. PACK ANYKERNEL3 ZIP
-      # --------------------------------------------------
       - name: Pack AnyKernel3 ZIP
+        if: ${{ !inputs.scan_only }}
         run: |
-          set -e
+          cd AnyKernel3
+          zip -r9 ../release/MalachiteOpt-GKI-6.1.174.zip . \
+            -x '.git/*' \
+            -x 'README.md' \
+            -x '*placeholder*'
 
-          cd "$AK3_DIR"
-
-          rm -f .git
-          rm -f README.md
-          rm -f *.md
-
-          ZIP_NAME="MalachiteOpt-GKI-6.1.174-Neutron23.zip"
-
-          zip -r9 "../$ZIP_NAME" . \
-            -x ".git/*" \
-            -x ".github/*"
-
-          cd ..
-
-          test -s "$ZIP_NAME"
-
-          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
-
-          ls -lh "$ZIP_NAME"
-
-      # --------------------------------------------------
-      # 15. VERIFY FINAL PACKAGE
-      # --------------------------------------------------
-      - name: Verify Final Package
-        run: |
-          set -e
-
-          unzip -t "$ZIP_NAME"
-
-          unzip -l "$ZIP_NAME" | grep -E \
-            "anykernel.sh|Image"
-
-          echo "Final AnyKernel3 package verified."
-
-      # --------------------------------------------------
-      # 16. BUILD REPORT
-      # --------------------------------------------------
-      - name: Generate Build Report
-        run: |
-          mkdir -p build-report
-
-          {
-            echo "MalachiteOpt GKI Build Report"
-            echo "============================"
-            echo ""
-            echo "Kernel: 6.1.174"
-            echo "Device: malachite / missi"
-            echo "Compiler: Neutron Clang 23"
-            echo "BBRv3: ${{ inputs.bbrv3 }}"
-            echo "ThinLTO: ${{ inputs.thin_lto }}"
-            echo "ZRAM LZ4: ${{ inputs.zram_lz4 }}"
-            echo "Re-Kernel audit: ${{ inputs.rekernel_audit }}"
-            echo "Build modules: ${{ inputs.build_modules }}"
-            echo "BORE: Disabled"
-            echo ""
-            echo "Package: $ZIP_NAME"
-            echo ""
-            echo "NOTE:"
-            echo "Vendor modules were not replaced."
-            echo "Module.symvers alone does not prove vendor KMI compatibility."
-            echo "Test Wi-Fi, Bluetooth, hotspot and boot on the target device."
-          } > build-report/build-info.txt
-
-          cp kernel-config.txt build-report/
-          cp "$ZIP_NAME" build-report/
-
-          if [ -f audit/rekernel-audit.txt ]; then
-            cp audit/rekernel-audit.txt build-report/
-          fi
-
-      # --------------------------------------------------
-      # 17. UPLOAD FLASHABLE ZIP
-      # --------------------------------------------------
-      - name: Upload Flashable ZIP
+      - name: Upload Flashable ZIP Artifact
+        if: ${{ !inputs.scan_only }}
         uses: actions/upload-artifact@v4
         with:
           name: MalachiteOpt-GKI-6.1.174
-          path: ${{ env.ZIP_NAME }}
-          if-no-files-found: error
-          compression-level: 0
-
-      # --------------------------------------------------
-      # 18. UPLOAD KERNEL CONFIGURATION
-      # --------------------------------------------------
-      - name: Upload Kernel Configuration
-        uses: actions/upload-artifact@v4
-        with:
-          name: MalachiteOpt-Kernel-Config
-          path: |
-            kernel-config.txt
-          if-no-files-found: error
-
-      # --------------------------------------------------
-      # 19. UPLOAD BUILD AND AUDIT REPORT
-      # --------------------------------------------------
-      - name: Upload Build and Re-Kernel Audit
-        uses: actions/upload-artifact@v4
-        with:
-          name: MalachiteOpt-Build-Report
-          path: build-report/
-          if-no-files-found: error
-          
+          path: release/MalachiteOpt-GKI-6.1.174.zip
+          retention-days: 14
