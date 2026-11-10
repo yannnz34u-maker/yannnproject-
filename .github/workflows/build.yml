@@ -1,48 +1,16 @@
-
-name: YannzProject - Malachite GKI 6.1.174 (Optimized)
+name: YannzProject - Malachite GKI 6.1.174
 
 on:
   workflow_dispatch:
     inputs:
-      ksu_next:
-        description: "KernelSU-Next v3.4.2"
-        type: boolean
-        default: false
-      resukisu:
-        description: "BakaSU / ReSukiSU v4.2.0-rc3"
-        type: boolean
-        default: false
-      susfs:
-        description: "Enable SUSFS (experimental)"
-        type: boolean
-        default: false
-      bbr:
-        description: "BBRv3 default TCP congestion control"
+      enable_susfs:
+        description: "Enable SUSFS"
         type: boolean
         default: true
-      rekernel:
-        description: "Build Re:Kernel LKM module"
+      enable_rekernel:
+        description: "Enable Re-Kernel"
         type: boolean
         default: true
-      gpu_oc:
-        description: "Enable GPU OPP overclock patch"
-        type: boolean
-        default: false
-      gpu_freq:
-        description: "GPU target frequency"
-        type: string
-        default: "1100"
-      gpu_unit:
-        description: "GPU frequency unit"
-        type: choice
-        options:
-          - MHz
-          - GHz
-        default: MHz
-      gpu_volt_mv:
-        description: "GPU voltage increment in mV (0 = unchanged)"
-        type: string
-        default: "0"
 
 permissions:
   contents: read
@@ -54,36 +22,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ==========================================
-      # VALIDATE ROOT SELECTION
-      # ==========================================
-
-      - name: Validate Root Selection
-        env:
-          KSU_NEXT: ${{ inputs.ksu_next }}
-          RESUKISU: ${{ inputs.resukisu }}
-          SUSFS: ${{ inputs.susfs }}
-        run: |
-          set -e
-
-          if [ "$KSU_NEXT" = "true" ] && [ "$RESUKISU" = "true" ]; then
-            echo "::error::KernelSU-Next and BakaSU cannot be enabled together."
-            exit 1
-          fi
-
-          if [ "$SUSFS" = "true" ] && \
-             [ "$KSU_NEXT" != "true" ] && \
-             [ "$RESUKISU" != "true" ]; then
-            echo "::error::SUSFS requires one root implementation."
-            exit 1
-          fi
-
-          echo "Root selection validated."
-
-      # ==========================================
-      # CHECKOUT
-      # ==========================================
-
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
@@ -98,7 +36,6 @@ jobs:
             /opt/ghc \
             /opt/hostedtoolcache/CodeQL
           df -h /
-
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -110,637 +47,116 @@ jobs:
             clang llvm lld \
             pahole lz4 kmod \
             device-tree-compiler \
-            rsync ccache jq
-
-      - name: Restore Ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-malachite-6.1.174-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ runner.os }}-malachite-6.1.174-
-
+            rsync ccache patch
       - name: Clone AnyKernel3
         run: |
-          git clone --depth=1 \
-            -b gki-2.0 \
-            https://github.com/WildKernels/AnyKernel3.git \
-            AnyKernel3
-
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+      - name: Install KernelSU-Next
+        run: |
+          cd kernel
+          git clone --depth=1 -b dev-susfs https://github.com/pershoot/KernelSU-Next.git KernelSU-Next
+          sed -i '/bool is_manager_apk/{n;s/.*/{\n\treturn true;/}' KernelSU-Next/kernel/manager/apk_sign.c
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'kernelsu/' drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+      - name: Install SUSFS
+        if: ${{ inputs.enable_susfs }}
+        run: |
+          cd kernel
+          git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/pershoot/susfs4ksu.git susfs_src
+          cp -f susfs_src/kernel_patches/fs/susfs.c fs/
+          cp -f susfs_src/kernel_patches/include/linux/susfs.h include/linux/
+          cp -f susfs_src/kernel_patches/include/linux/susfs_def.h include/linux/
+          patch -p1 --forward -r - < susfs_src/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch || true
+          rm -f android/abi_gki_protected_exports_*
+      - name: Install Re-Kernel
+        if: ${{ inputs.enable_rekernel }}
+        run: |
+          cd kernel
+          git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git rekernel_repo
+          bash rekernel_repo/Integrate/patches.sh || true
       - name: Verify Kernel Source
         run: |
           cd kernel
-
           echo "===== KERNEL VERSION ====="
           make -s kernelversion
           git log -1 --oneline
-
-          test -f arch/arm64/configs/gki_defconfig || {
-            echo "::error::gki_defconfig not found"
-            exit 1
-          }
-
-      # ==========================================
-      # KERNELSU-NEXT v3.4.2
-      # ==========================================
-
-      - name: Install KernelSU-Next v3.4.2
-        if: ${{ inputs.ksu_next }}
-        run: |
-          set -e
-          cd kernel
-
-          curl -LSs \
-            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v3.4.2/kernel/setup.sh \
-            | bash -s v3.4.2
-
-          test -d KernelSU-Next || {
-            echo "::error::KernelSU-Next directory missing"
-            exit 1
-          }
-
-          cd KernelSU-Next
-          git describe --tags --exact-match
-
-          cd ..
-          echo "KERNEL_ROOT=KernelSU-Next-v3.4.2" >> "$GITHUB_ENV"
-
-      # ==========================================
-      # BAKASU / RESUKISU v4.2.0-rc3
-      # ==========================================
-
-      - name: Install BakaSU v4.2.0-rc3
-        if: ${{ inputs.resukisu }}
-        run: |
-          set -e
-          cd kernel
-
-          curl -LSs \
-            https://raw.githubusercontent.com/Baka-SU/BakaSU/v4.2.0-rc3/kernel/setup.sh \
-            | bash -s v4.2.0-rc3
-
-          test -d KernelSU || {
-            echo "::error::BakaSU source directory missing"
-            exit 1
-          }
-
-          cd KernelSU
-          git describe --tags --exact-match
-
-          cd ..
-          echo "KERNEL_ROOT=BakaSU-v4.2.0-rc3" >> "$GITHUB_ENV"
-
-      # ==========================================
-      # SUSFS
-      # ==========================================
-
-      - name: Install SUSFS
-        if: ${{ inputs.susfs && (inputs.ksu_next || inputs.resukisu) }}
-        run: |
-          set -e
-
-          git clone --depth=1 \
-            -b gki-android14-6.1 \
-            https://gitlab.com/simonpunk/susfs4ksu.git \
-            susfs4ksu
-
-          cd kernel
-
-          test -f ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-
-          cp -a ../susfs4ksu/kernel_patches/fs/. fs/
-          cp -a ../susfs4ksu/kernel_patches/include/linux/. include/linux/
-
-          patch -p1 \
-            < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-
-          echo "SUSFS_ENABLED=1" >> "$GITHUB_ENV"
-
-      # ==========================================
-      # GPU OPP PATCH
-      # ==========================================
-
-      - name: Create GPU OPP Patch Script
-        if: ${{ inputs.gpu_oc }}
-        run: |
-          cat > patch_opp.py <<'PYEOF'
-          import re
-          import sys
-          import pathlib
-
-          def parse_hz(value):
-              value = value.strip().lower()
-
-              if value.endswith("ghz"):
-                  return int(float(value[:-3]) * 1e9)
-
-              if value.endswith("mhz"):
-                  return int(float(value[:-3]) * 1e6)
-
-              return int(float(value) * 1e6)
-
-          kind = sys.argv[1]
-          target_hz = parse_hz(sys.argv[2])
-          voltage_mv = int(sys.argv[3])
-
-          patched = 0
-
-          for path in pathlib.Path("kernel").rglob("*"):
-              if path.suffix not in (".dts", ".dtsi"):
-                  continue
-
-              try:
-                  content = path.read_text()
-              except Exception:
-                  continue
-
-              if "opp-hz" not in content:
-                  continue
-
-              stack = []
-              blocks = []
-
-              for match in re.finditer(r"[{}]", content):
-                  if match.group() == "{":
-                      stack.append(match.start())
-                  elif stack:
-                      blocks.append((stack.pop(), match.start()))
-
-              leafs = [
-                  (start, end)
-                  for start, end in blocks
-                  if "{" not in content[start + 1:end]
-                  and "opp-hz" in content[start:end]
-              ]
-
-              tables = [
-                  (start, end)
-                  for start, end in blocks
-                  if "operating-points-v2" in content[start:end]
-                  and any(
-                      start < a and b < end
-                      for a, b in leafs
-                  )
-              ]
-
-              edits = []
-
-              for start, end in tables:
-                  header_start = max(
-                      content.rfind(c, 0, start)
-                      for c in ";{}"
-                  ) + 1
-
-                  header = content[header_start:start]
-
-                  if kind not in str(path).lower() and \
-                     kind not in header.lower():
-                      continue
-
-                  entries = [
-                      (a, b)
-                      for a, b in leafs
-                      if start < a and b < end
-                  ]
-
-                  best = None
-
-                  for a, b in entries:
-                      match = re.search(
-                          r"opp-hz\s*=\s*(?:/bits/\s*64\s*)?<([^>]+)>",
-                          content[a:b]
-                      )
-
-                      if not match:
-                          continue
-
-                      values = match.group(1).split()
-
-                      try:
-                          frequency = int(values[-1], 0)
-                      except ValueError:
-                          continue
-
-                      if best is None or frequency > best[0]:
-                          best = (frequency, a, b, match, values)
-
-                  if best is None:
-                      continue
-
-                  old_hz, a, b, match, values = best
-
-                  if target_hz <= old_hz:
-                      print(f"SKIP {path}: target not higher")
-                      continue
-
-                  edits.append((
-                      a + match.start(1),
-                      a + match.end(1),
-                      " ".join(values[:-1] + [str(target_hz)])
-                  ))
-
-                  if voltage_mv:
-                      voltage = re.search(
-                          r"opp-microvolt\s*=\s*<([^>]+)>",
-                          content[a:b]
-                      )
-
-                      if voltage:
-                          voltages = voltage.group(1).split()
-                          updated = [
-                              str(int(v, 0) + voltage_mv * 1000)
-                              for v in voltages
-                          ]
-
-                          edits.append((
-                              a + voltage.start(1),
-                              a + voltage.end(1),
-                              " ".join(updated)
-                          ))
-
-                  print(
-                      f"PATCH {path}: "
-                      f"{old_hz / 1e6:.0f} MHz -> "
-                      f"{target_hz / 1e6:.0f} MHz"
-                  )
-
-                  patched += 1
-
-              for start, end, replacement in sorted(edits, reverse=True):
-                  content = (
-                      content[:start]
-                      + replacement
-                      + content[end:]
-                  )
-
-              if edits:
-                  path.write_text(content)
-
-          print(f"TOTAL PATCHED: {patched}")
-
-          if patched == 0:
-              print("::error::No matching GPU OPP table found")
-              sys.exit(1)
-          PYEOF
-
-      - name: Apply GPU OPP Patch
-        if: ${{ inputs.gpu_oc }}
-        env:
-          FREQ: ${{ inputs.gpu_freq }}
-          UNIT: ${{ inputs.gpu_unit }}
-          MV: ${{ inputs.gpu_volt_mv }}
-        run: |
-          set -e
-          python3 patch_opp.py gpu "${FREQ}${UNIT}" "$MV"
-          cd kernel
-          git diff --stat
-
-      # ==========================================
-      # CONFIGURATION
-      # ==========================================
-
       - name: Configure GKI Defconfig
-        env:
-          KSU_NEXT: ${{ inputs.ksu_next }}
-          RESUKISU: ${{ inputs.resukisu }}
-          BBR: ${{ inputs.bbr }}
-          REKERNEL: ${{ inputs.rekernel }}
         run: |
-          set -e
           cd kernel
-
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
-
-          if [ "$KSU_NEXT" = "true" ] || [ "$RESUKISU" = "true" ]; then
-            ./scripts/config --file out/.config -e KSU
-          else
-            ./scripts/config --file out/.config -d KSU
-          fi
-
-          if [ -f ../susfs.flag ] || \
-             [ -d ../susfs4ksu ]; then
-            ./scripts/config --file out/.config \
-              -e KSU_SUSFS \
-              -e KSU_SUSFS_SUS_PATH \
-              -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT \
-              -e KSU_SUSFS_SPOOF_UNAME \
-              -e KSU_SUSFS_OPEN_REDIRECT
-          fi
-
-          if [ "$BBR" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e TCP_CONG_ADVANCED \
-              -e TCP_CONG_BBR \
-              -d DEFAULT_CUBIC \
-              -e DEFAULT_BBR \
-              --set-str DEFAULT_TCP_CONG bbr \
-              -e NET_SCH_FQ
-          fi
-
-          if [ "$REKERNEL" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e MODULES \
-              -e MODULE_UNLOAD \
-              -d MODULE_SIG_FORCE
-          fi
-
+          ./scripts/config --file out/.config \
+            -d MODULE_SIG_PROTECT \
+            -e KSU \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SUS_OVERLAYFS \
+            -e KSU_SUSFS_TRY_UMOUNT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e KSU_SUSFS_OPEN_REDIRECT \
+            -e KSU_SUSFS_SUS_MAP \
+            -e REKERNEL \
+            -d REKERNEL_NETWORK
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-
-          echo "===== ROOT CONFIG ====="
-          grep -E '^CONFIG_(KSU|KSU_SUSFS)=' out/.config || true
-
-          echo "===== NETWORK CONFIG ====="
-          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_TCP_CONG|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
-
-          echo "===== MODULE CONFIG ====="
-          grep -E '^CONFIG_(MODULES|MODULE_UNLOAD|MODVERSIONS)=' out/.config || true
-
-          if [ "$KSU_NEXT" = "true" ] || [ "$RESUKISU" = "true" ]; then
-            grep -q '^CONFIG_KSU=y' out/.config || {
-              echo "::error::CONFIG_KSU is not enabled"
-              exit 1
-            }
-          fi
-
-          if [ "$BBR" = "true" ]; then
-            grep -q '^CONFIG_TCP_CONG_BBR=y' out/.config || {
-              echo "::error::BBR configuration failed"
-              exit 1
-            }
-          fi
-
-      # ==========================================
-      # BUILD
-      # ==========================================
-
+          echo "===== FINAL CONFIG ====="
+          grep -E '^CONFIG_(KSU|KSU_SUSFS|REKERNEL)=' out/.config || true
       - name: Compile GKI Kernel
         run: |
-          set -e
-
-          export CCACHE_DIR="$HOME/.cache/ccache"
-          export CCACHE_MAXSIZE=5G
-
-          ccache -z
-
           cd kernel
-
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            CC="ccache clang" \
             Image
-
-          ccache -s
-
-      - name: Verify Kernel Image
+      - name: Verify Kernel Image Output
         run: |
-          set -e
-
-          IMAGE=kernel/out/arch/arm64/boot/Image
-
-          test -s "$IMAGE"
-
-          echo "===== IMAGE INFO ====="
-          ls -lh "$IMAGE"
-
-          strings "$IMAGE" | grep -m1 'Linux version' || true
-
-      # ==========================================
-      # RE:KERNEL LKM
-      # ==========================================
-
-      - name: Build Re:Kernel LKM
-        if: ${{ inputs.rekernel && (inputs.ksu_next || inputs.resukisu) }}
-        continue-on-error: true
-        run: |
-          set -e
-
-          git clone --depth=1 \
-            https://github.com/Sakion-Team/Re-Kernel.git \
-            Re-Kernel
-
-          SRC="$(find Re-Kernel/LKM-Source \
-            -name Makefile -print -quit | xargs -r dirname)"
-
-          if [ -z "$SRC" ]; then
-            echo "::warning::Re-Kernel Makefile not found"
-            exit 1
-          fi
-
-          make -C kernel O=out \
-            ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
-
-          make -C kernel O=out \
-            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            M="$GITHUB_WORKSPACE/$SRC" modules
-
-          KO="$(find "$SRC" -name '*.ko' -print -quit)"
-
-          if [ -z "$KO" ]; then
-            echo "::warning::Re-Kernel module not generated"
-            exit 1
-          fi
-
-          mkdir -p rekernel-mod
-          cp "$KO" rekernel-mod/re-kernel.ko
-
-          echo "REKERNEL_OK=1" >> "$GITHUB_ENV"
-
-      # ==========================================
-      # KSU NEXT MANAGER
-      # ==========================================
-
-      - name: Download KernelSU-Next Manager
-        if: ${{ inputs.ksu_next }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p release
-
-          URL="$(gh api \
-            repos/KernelSU-Next/KernelSU-Next/releases/tags/v3.4.2 \
-            --jq '[.assets[] | select(.name | endswith(".apk"))][0].browser_download_url // empty')"
-
-          if [ -n "$URL" ]; then
-            curl -fL "$URL" \
-              -o release/KernelSU-Next-v3.4.2-Manager.apk
-
-            echo "KernelSU-Next v3.4.2 manager downloaded."
-          else
-            echo "::warning::No APK asset found in v3.4.2 release."
-          fi
-
-      # ==========================================
-      # ROOT MANAGER INFORMATION
-      # ==========================================
-
-      - name: Create Root Version Information
-        run: |
-          mkdir -p release
-
-          {
-            echo "YannzProject - Malachite GKI 6.1.174"
-            echo "======================================"
-
-            if [ "${{ inputs.ksu_next }}" = "true" ]; then
-              echo "Root: KernelSU-Next"
-              echo "Version: v3.4.2"
-              echo "Manager: KernelSU-Next v3.4.2"
-            elif [ "${{ inputs.resukisu }}" = "true" ]; then
-              echo "Root: BakaSU / ReSukiSU"
-              echo "Version: v4.2.0-rc3"
-              echo "Manager: BakaSU matching build required"
-              echo "Manager APK is not distributed in GitHub Releases."
-            else
-              echo "Root: None"
-            fi
-
-            echo "SUSFS: ${{ inputs.susfs }}"
-            echo "BBRv3: ${{ inputs.bbr }}"
-            echo "ReKernel: ${{ inputs.rekernel }}"
-            echo "GPU OC: ${{ inputs.gpu_oc }}"
-          } > release/root-version.txt
-
-      # ==========================================
-      # ANYKERNEL3
-      # ==========================================
-
+          test -s kernel/out/arch/arm64/boot/Image
+          echo "===== KERNEL OUTPUT SIZE ====="
+          ls -lh kernel/out/arch/arm64/boot/Image
       - name: Prepare AnyKernel3
         run: |
           set -e
-
           mkdir -p release
-
-          rm -rf AnyKernel3/.git \
-            AnyKernel3/Image* \
-            AnyKernel3/ramdisk \
-            AnyKernel3/modules 2>/dev/null || true
-
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
-
-          cat <<'BNEOF' > AnyKernel3/banner
-          #   #  ###  #   # #   # ##### #####  ####   ###  ##### #####  #### #####
-           # #  #   # ##  # ##  #   #   #   #  #   # #   #   #   #     #     #
-            #   ##### # # # # # #  #    #####  ####  #   #   #   ####  #     #
-            #   #   # #  ## #  ## #     #      #  #  #   #   #   #     #     #
-            #   #   # #   # #   # ##### #      #   #  ###  # #   #####  ####   #
-          GKI 6.1.174 | Malachite
-          YannzProject
-          BNEOF
-
-          cat <<'AK3EOF' > AnyKernel3/anykernel.sh
-          properties() {
-            'kernel.string=YannzProject GKI 6.1.174 Malachite'
-            'do.devicecheck=1'
-            'do.modules=0'
-            'do.systemless=1'
-            'do.cleanup=1'
-            'do.cleanuponabort=0'
-            'device.name1=malachite'
-            'device.name2=missi'
-            'supported.versions='
-          }
-
+          cat << 'AK3EOF' > AnyKernel3/anykernel.sh
+          properties() { '
+          kernel.string=YannzProject GKI 6.1.174 (Universal Malachite)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=malachite
+          device.name2=missi
+          supported.versions=
+          '; }
           BLOCK=boot;
           IS_SLOT_DEVICE=auto;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
-
           . tools/ak3-core.sh;
-
           split_boot;
           flash_boot;
           AK3EOF
-
       - name: Pack AnyKernel3 ZIP
         run: |
-          set -e
-
           cd AnyKernel3
-
-          zip -r9 \
-            ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
+          zip -r9 ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
             -x '.git/*' \
             -x 'README.md' \
             -x '*placeholder*'
-
-          cd ../release
-
-          sha256sum \
-            YannzProject-Malachite-GKI-6.1.174.zip \
-            | tee YannzProject-Malachite-GKI-6.1.174.zip.sha256
-
-      # ==========================================
-      # REKERNEL MODULE PACKAGE
-      # ==========================================
-
-      - name: Pack Re:Kernel KSU Module
-        if: ${{ inputs.rekernel && (inputs.ksu_next || inputs.resukisu) && env.REKERNEL_OK == '1' }}
-        run: |
-          set -e
-
-          cd rekernel-mod
-
-          cat <<'EOF' > module.prop
-          id=yannnz_rekernel
-          name=Re:Kernel LKM (YannzProject)
-          version=6.1.174
-          versionCode=1
-          author=yannnz
-          description=Re-Kernel LKM for YannzProject GKI 6.1.174
-          EOF
-
-          cat <<'EOF' > service.sh
-          #!/system/bin/sh
-
-          MODDIR=${0%/*}
-
-          until [ "$(getprop sys.boot_completed)" = "1" ]; do
-            sleep 2
-          done
-
-          sleep 10
-
-          lsmod | grep -q 're.kernel' || \
-            insmod "$MODDIR/re-kernel.ko"
-          EOF
-
-          chmod 755 service.sh
-
-          zip -r9 \
-            ../release/Re-Kernel-LKM-YannzProject.zip .
-
-      # ==========================================
-      # UPLOAD ARTIFACTS
-      # ==========================================
-
       - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
           name: YannzProject-Malachite-GKI-6.1.174
-          path: |
-            release/YannzProject-Malachite-GKI-6.1.174.zip
-            release/YannzProject-Malachite-GKI-6.1.174.zip.sha256
-            release/root-version.txt
-          retention-days: 14
-
-      - name: Upload KernelSU-Next Manager
-        if: ${{ inputs.ksu_next }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSU-Next-Manager-v3.4.2
-          path: release/KernelSU-Next-v3.4.2-Manager.apk
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload Re:Kernel Module
-        if: ${{ inputs.rekernel && (inputs.ksu_next || inputs.resukisu) && env.REKERNEL_OK == '1' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: Re-Kernel-LKM-YannzProject
-          path: release/Re-Kernel-LKM-YannzProject.zip
+          path: release/YannzProject-Malachite-GKI-6.1.174.zip
           retention-days: 14
