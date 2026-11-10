@@ -1,16 +1,8 @@
-name: MalachiteOpt - GKI 6.1.174 (Full)
+Name: YannzProject - Malachite GKI 6.1.174 (Optimized)
 
 on:
   workflow_dispatch:
     inputs:
-      scan_only:
-        description: "Hanya scan tabel GPU OPP (tanpa compile kernel)"
-        type: boolean
-        default: false
-      scan_vendor:
-        description: "Ikut scan source vendor MediaTek (MiCode malachite-u-oss)"
-        type: boolean
-        default: false
       ksu:
         description: "Tambah KernelSU-Next (root)"
         type: boolean
@@ -20,7 +12,7 @@ on:
         type: boolean
         default: false
       bbr:
-        description: "Jadikan BBR default TCP congestion control"
+        description: "Jadikan BBRv3 default TCP congestion control"
         type: boolean
         default: true
       rekernel:
@@ -46,24 +38,13 @@ on:
         description: "GPU: tambah voltase (mV), 0 = tidak diubah"
         type: string
         default: "0"
-      release:
-        description: "Buat GitHub Release otomatis"
-        type: boolean
-        default: false
-      release_tag:
-        description: "Tag release (kosong = otomatis dari versi + tanggal)"
-        type: string
-        default: ""
 
 permissions:
-  contents: write
-
-env:
-  ZIP_NAME: MalachiteOpt-GKI-6.1.174
+  contents: read
 
 jobs:
   build:
-    name: Build YannnzKernel GKI 6.1.174 + AnyKernel3
+    name: Build GKI 6.1.174 + KSU + SUSFS + BBRv3 + AnyKernel3
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -113,55 +94,15 @@ jobs:
           test -f arch/arm64/configs/gki_defconfig || \
             { echo "::error::gki_defconfig tidak ada di arch/arm64/configs/"; exit 1; }
 
-      - name: Clone vendor MediaTek source (scan saja)
-        if: ${{ inputs.scan_vendor }}
-        run: |
-          git clone --depth=1 -b malachite-u-oss \
-            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git vendor
-
-      - name: Find GPU OPP table
-        run: |
-          scan() {
-            local dir="$1"
-            echo "##### SCAN: $dir #####"
-            cd "$dir"
-            echo "===== GPUFREQ FILES ====="
-            find . -ipath '*gpufreq*' \( -name '*.c' -o -name '*.h' \) | head -30
-            echo
-            echo "===== OPP TABLE ====="
-            grep -rIn --include='*.c' --include='*.h' \
-              -E 'g_default_gpu|g_opp_table|GPU_OPP' . | head -30
-            echo
-            echo "===== MALI / GED ====="
-            find . -maxdepth 6 -type d \( -iname '*mali*' -o -iname '*ged*' \) | head -20
-            echo
-            echo "===== DTS GPU OPP ====="
-            grep -rIln --include='*.dts' --include='*.dtsi' \
-              -E 'gpu.*opp|opp.*gpu' . | grep -iE 'mediatek|mt6878|malachite' | head -20
-            echo
-            cd - >/dev/null
-          }
-          {
-            scan kernel
-            if [ -d vendor ]; then scan vendor; fi
-          } 2>&1 | tee gpu-scan.txt
-
-      - name: Upload GPU scan report
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-scan-report
-          path: gpu-scan.txt
-          retention-days: 7
-
       - name: Add KernelSU-Next
-        if: ${{ !inputs.scan_only && inputs.ksu }}
+        if: ${{ inputs.ksu }}
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           ls -d KernelSU* drivers/kernelsu 2>/dev/null || true
 
       - name: Add SUSFS (experimental)
-        if: ${{ !inputs.scan_only && inputs.ksu && inputs.susfs }}
+        if: ${{ inputs.ksu && inputs.susfs }}
         continue-on-error: true
         run: |
           git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
@@ -173,7 +114,7 @@ jobs:
           echo "SUSFS patch applied"
 
       - name: Write OPP patch script
-        if: ${{ !inputs.scan_only && inputs.gpu_oc }}
+        if: ${{ inputs.gpu_oc }}
         run: |
           cat << 'PYEOF' > patch_opp.py
           import re, sys, pathlib
@@ -253,13 +194,10 @@ jobs:
                   path.write_text(t)
 
           print(f"TOTAL {kind} OPP tables patched: {patched}")
-          if patched == 0:
-              print(f"::warning::Tidak ada tabel OPP {kind} di DTS source. "
-                    f"OC {kind} tidak diterapkan (kemungkinan di firmware / modul vendor).")
           PYEOF
 
       - name: Patch GPU OC
-        if: ${{ !inputs.scan_only && inputs.gpu_oc }}
+        if: ${{ inputs.gpu_oc }}
         env:
           FREQ: ${{ inputs.gpu_freq }}
           UNIT: ${{ inputs.gpu_unit }}
@@ -269,7 +207,6 @@ jobs:
           cd kernel && git diff --stat | tail -20
 
       - name: Configure GKI Defconfig
-        if: ${{ !inputs.scan_only }}
         run: |
           cd kernel
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
@@ -309,10 +246,9 @@ jobs:
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "===== CONFIG CHECK ====="
-          grep -E '^CONFIG_(KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_TCP_CONG|MODULES|MODVERSIONS|MODULE_SIG_FORCE)=' out/.config || true
+          grep -E '^CONFIG_(KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_TCP_CONG|MODULES|MODVERSIONS)=' out/.config || true
 
       - name: Compile GKI Kernel
-        if: ${{ !inputs.scan_only }}
         run: |
           export CCACHE_DIR="$HOME/.cache/ccache"
           export CCACHE_MAXSIZE=5G
@@ -324,11 +260,10 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             CC="ccache clang" \
-            Image 2>&1 | tee ../build.log
+            Image
           ccache -s
 
       - name: Verify Kernel Image Output
-        if: ${{ !inputs.scan_only }}
         run: |
           test -s kernel/out/arch/arm64/boot/Image
           echo "===== KERNEL OUTPUT SIZE ====="
@@ -336,18 +271,15 @@ jobs:
           strings kernel/out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
 
       - name: Build Re:Kernel LKM
-        if: ${{ !inputs.scan_only && inputs.rekernel }}
+        if: ${{ inputs.rekernel }}
         continue-on-error: true
         run: |
           git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git Re-Kernel
           SRC="$(find Re-Kernel/LKM-Source -name Makefile -print -quit | xargs -r dirname)"
           if [ -z "$SRC" ]; then
             echo "::warning::Makefile di Re-Kernel/LKM-Source tidak ditemukan"
-            find Re-Kernel/LKM-Source | head -30
             exit 1
-          fi
-          echo "LKM source: $SRC"
-
+          }
           make -C kernel O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
           make -C kernel O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             M="$GITHUB_WORKSPACE/$SRC" modules
@@ -356,45 +288,25 @@ jobs:
           test -n "$KO" || { echo "::warning::re-kernel.ko tidak terbentuk"; exit 1; }
           mkdir -p rekernel-mod
           cp "$KO" rekernel-mod/re-kernel.ko
-          modinfo rekernel-mod/re-kernel.ko | head -10 || true
           echo "REKERNEL_OK=1" >> "$GITHUB_ENV"
 
       - name: Prepare AnyKernel3 Package
-        if: ${{ !inputs.scan_only }}
         run: |
           mkdir -p release
           rm -rf AnyKernel3/.git AnyKernel3/Image* AnyKernel3/ramdisk AnyKernel3/modules 2>/dev/null || true
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
-          cat << 'BNEOF' | sed 's/ /\xe2\xa0\x80/g' > AnyKernel3/banner
-          #   #  ###  #   # #   # #   # #####
-          #   # #   # ##  # ##  # ##  #    #
-           # #  ##### # # # # # # # # #   #
-            #   #   # #  ## #  ## #  ##  #
-            #   #   # #   # #   # #   # #####
-
-          #   # ##### ####  #   # ##### #
-          #  #  #     #   # ##  # #     #
-          ###   ####  ####  # # # ####  #
-          #  #  #     #  #  #  ## #     #
-          #   # ##### #   # #   # ##### #####
-
-          GKI 6.1.174 | Malachite
-          BNEOF
-
           cat << 'AK3EOF' > AnyKernel3/anykernel.sh
           properties() { '
-          kernel.string=YannnzKernel GKI 6.1.174 (Malachite)
+          kernel.string=YannzProject GKI 6.1.174 (Malachite Optimized)
           do.devicecheck=1
           do.modules=0
-          do.systemless=0
+          do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=malachite
           device.name2=missi
           supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
           '; }
 
           BLOCK=boot;
@@ -404,34 +316,31 @@ jobs:
 
           . tools/ak3-core.sh;
 
-          dump_boot;
-          write_boot;
+          split_boot;
+          flash_boot;
           AK3EOF
 
       - name: Pack AnyKernel3 ZIP
-        if: ${{ !inputs.scan_only }}
         run: |
           cd AnyKernel3
-          zip -r9 ../release/${ZIP_NAME}.zip . \
+          zip -r9 ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
             -x '.git/*' \
             -x 'README.md' \
             -x '*placeholder*'
           cd ../release
-          sha256sum ${ZIP_NAME}.zip | tee ${ZIP_NAME}.zip.sha256
-          md5sum ${ZIP_NAME}.zip | tee ${ZIP_NAME}.zip.md5
+          sha256sum YannzProject-Malachite-GKI-6.1.174.zip | tee YannzProject-Malachite-GKI-6.1.174.zip.sha256
 
       - name: Pack Re:Kernel module (KSU)
-        if: ${{ !inputs.scan_only && inputs.rekernel && env.REKERNEL_OK == '1' }}
+        if: ${{ inputs.rekernel && env.REKERNEL_OK == '1' }}
         run: |
           cd rekernel-mod
-
           cat << 'EOF' > module.prop
           id=yannnz_rekernel
-          name=Re:Kernel LKM (YannnzKernel)
+          name=Re:Kernel LKM (YannzProject)
           version=6.1.174
           versionCode=1
           author=yannnz
-          description=Re:Kernel loadable module untuk YannnzKernel GKI 6.1.174 (malachite)
+          description=Re:Kernel loadable module untuk YannzProject GKI 6.1.174
           EOF
 
           cat << 'EOF' > service.sh
@@ -443,49 +352,21 @@ jobs:
           EOF
           chmod 755 service.sh
 
-          zip -r9 ../release/Re-Kernel-LKM-YannnzKernel.zip .
-          cd ../release
-          sha256sum Re-Kernel-LKM-YannnzKernel.zip | tee Re-Kernel-LKM-YannnzKernel.zip.sha256
-
-      - name: Upload Build Log
-        if: ${{ always() && !inputs.scan_only }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-          if-no-files-found: ignore
-          retention-days: 7
+          zip -r9 ../release/Re-Kernel-LKM-YannnzProject.zip .
 
       - name: Upload Flashable ZIP Artifact
-        if: ${{ !inputs.scan_only }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
+          name: YannzProject-Malachite-GKI-6.1.174
           path: |
-            release/${{ env.ZIP_NAME }}.zip
-            release/${{ env.ZIP_NAME }}.zip.sha256
-            release/${{ env.ZIP_NAME }}.zip.md5
+            release/YannzProject-Malachite-GKI-6.1.174.zip
+            release/YannzProject-Malachite-GKI-6.1.174.zip.sha256
           retention-days: 14
 
       - name: Upload Re:Kernel module Artifact
-        if: ${{ !inputs.scan_only && inputs.rekernel && env.REKERNEL_OK == '1' }}
+        if: ${{ inputs.rekernel && env.REKERNEL_OK == '1' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Re-Kernel-LKM-YannnzKernel
-          path: |
-            release/Re-Kernel-LKM-YannnzKernel.zip
-            release/Re-Kernel-LKM-YannnzKernel.zip.sha256
+          name: Re-Kernel-LKM-YannnzProject
+          path: release/Re-Kernel-LKM-YannnzProject.zip
           retention-days: 14
-
-      - name: Create GitHub Release
-        if: ${{ !inputs.scan_only && inputs.release }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_IN: ${{ inputs.release_tag }}
-        run: |
-          KVER="$(make -C kernel -s kernelversion)"
-          TAG="${TAG_IN:-v${KVER}-$(date +%Y%m%d-%H%M)}"
-          gh release create "$TAG" release/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "YannnzKernel GKI ${KVER}" \
-            --notes "Kernel GKI ${KVER} untuk Poco X7 (malachite). KSU-Next: ${{ inputs.ksu }}, SUSFS: ${{ inputs.susfs }}, BBR: ${{ inputs.bbr }}, Re:Kernel: ${{ inputs.rekernel }}. Flash zip kernel lewat KernelSU manager / recovery, lalu (opsional) pasang zip Re-Kernel-LKM sebagai modul KSU. Verifikasi dengan file .sha256."
