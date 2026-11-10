@@ -23,26 +23,21 @@ on:
         description: "Jadikan BBR default TCP congestion control"
         type: boolean
         default: true
-      cpu_oc:
-        description: "Aktifkan CPU overclock"
-        type: boolean
-        default: false
-      cpu_boost_pct:
-        description: "CPU: naik berapa % dari frekuensi OPP tertinggi"
-        type: string
-        default: "5"
-      cpu_volt_mv:
-        description: "CPU: tambah voltase (mV), 0 = tidak diubah"
-        type: string
-        default: "0"
       gpu_oc:
-        description: "Aktifkan GPU overclock"
+        description: "GPU: aktifkan overclock"
         type: boolean
         default: false
-      gpu_boost_pct:
-        description: "GPU: naik berapa % dari frekuensi OPP tertinggi"
+      gpu_freq:
+        description: "GPU: angka frekuensi target (contoh: 1100 atau 1.1)"
         type: string
-        default: "5"
+        default: "1100"
+      gpu_unit:
+        description: "GPU: satuan"
+        type: choice
+        options:
+          - MHz
+          - GHz
+        default: MHz
       gpu_volt_mv:
         description: "GPU: tambah voltase (mV), 0 = tidak diubah"
         type: string
@@ -174,13 +169,21 @@ jobs:
           echo "SUSFS patch applied"
 
       - name: Write OPP patch script
-        if: ${{ !inputs.scan_only && (inputs.cpu_oc || inputs.gpu_oc) }}
+        if: ${{ !inputs.scan_only && inputs.gpu_oc }}
         run: |
           cat << 'PYEOF' > patch_opp.py
           import re, sys, pathlib
 
+          def parse_hz(s):
+              s = s.strip().lower().replace(" ", "")
+              if s.endswith("ghz"):
+                  return int(round(float(s[:-3]) * 1e9))
+              if s.endswith("mhz"):
+                  return int(round(float(s[:-3]) * 1e6))
+              return int(round(float(s) * 1e6))
+
           kind = sys.argv[1]
-          pct = float(sys.argv[2])
+          target_hz = parse_hz(sys.argv[2])
           mv = int(sys.argv[3])
           patched = 0
 
@@ -227,14 +230,17 @@ jobs:
                   if best is None:
                       continue
                   val, a, b, m, nums = best
-                  new = int(round(val * (1 + pct / 100.0) / 1e6)) * 1000000
+                  new = target_hz
+                  if new <= val:
+                      print(f"SKIP {path}: target {new} Hz <= OPP tertinggi {val} Hz")
+                      continue
                   edits.append((a + m.start(1), a + m.end(1), " ".join(nums[:-1] + [str(new)])))
                   if mv:
                       v = re.search(r"opp-microvolt\s*=\s*<([^>]*)>", t[a:b])
                       if v:
                           vn = [str(int(x, 0) + mv * 1000) for x in v.group(1).split()]
                           edits.append((a + v.start(1), a + v.end(1), " ".join(vn)))
-                  print(f"PATCHED {path}: {val} -> {new} Hz (+{mv} mV)")
+                  print(f"PATCHED {path}: {val/1e6:.0f} MHz -> {new/1e6:.0f} MHz (+{mv} mV)")
                   patched += 1
 
               if edits:
@@ -248,22 +254,14 @@ jobs:
                     f"OC {kind} tidak diterapkan (kemungkinan di firmware / modul vendor).")
           PYEOF
 
-      - name: Patch CPU OC
-        if: ${{ !inputs.scan_only && inputs.cpu_oc }}
-        env:
-          PCT: ${{ inputs.cpu_boost_pct }}
-          MV: ${{ inputs.cpu_volt_mv }}
-        run: |
-          python3 patch_opp.py cpu "$PCT" "$MV"
-          cd kernel && git diff --stat | tail -20
-
       - name: Patch GPU OC
         if: ${{ !inputs.scan_only && inputs.gpu_oc }}
         env:
-          PCT: ${{ inputs.gpu_boost_pct }}
+          FREQ: ${{ inputs.gpu_freq }}
+          UNIT: ${{ inputs.gpu_unit }}
           MV: ${{ inputs.gpu_volt_mv }}
         run: |
-          python3 patch_opp.py gpu "$PCT" "$MV"
+          python3 patch_opp.py gpu "${FREQ}${UNIT}" "$MV"
           cd kernel && git diff --stat | tail -20
 
       - name: Configure GKI Defconfig
