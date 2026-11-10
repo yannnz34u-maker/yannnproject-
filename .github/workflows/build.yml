@@ -279,7 +279,7 @@ jobs:
           if [ -z "$SRC" ]; then
             echo "::warning::Makefile di Re-Kernel/LKM-Source tidak ditemukan"
             exit 1
-          }
+          fi
           make -C kernel O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
           make -C kernel O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             M="$GITHUB_WORKSPACE/$SRC" modules
@@ -295,6 +295,16 @@ jobs:
           mkdir -p release
           rm -rf AnyKernel3/.git AnyKernel3/Image* AnyKernel3/ramdisk AnyKernel3/modules 2>/dev/null || true
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+
+          cat << 'BNEOF' | sed 's/ /\xe2\xa0\x80/g' > AnyKernel3/banner
+          #   #  ###  #   # #   # ##### #####  ####   ###  ##### #####  #### #####
+           # #  #   # ##  # ##  #   #   #   #  #   # #   #   #   #     #     #
+            #   ##### # # # # # #  #    #####  ####  #   #   #   ####  #     #
+            #   #   # #  ## #  ## #     #      #  #  #   #   #   #     #     #
+            #   #   # #   # #   # ##### #      #   #  ###  # #   #####  ####   #
+
+          GKI 6.1.174 | Malachite
+          BNEOF
 
           cat << 'AK3EOF' > AnyKernel3/anykernel.sh
           properties() { '
