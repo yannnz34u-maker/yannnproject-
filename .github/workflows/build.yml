@@ -1,4 +1,5 @@
-name: Malachite GKI 6.1 Build
+
+name: MalachiteOpt GKI 6.1.174
 
 on:
   workflow_dispatch:
@@ -8,105 +9,533 @@ permissions:
 
 jobs:
   build:
-    name: Build Malachite GKI
+    name: MalachiteOpt GKI 6.1.174 + BBRv3
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
+    env:
+      KERNEL_DIR: kernel
+      OUT_DIR: out
+      TC_DIR: /home/runner/toolchains/neutron-clang
+      NEUTRON_TAG: 17062026
+
     steps:
-      - name: Checkout kernel
+      # ==========================================
+      # CHECKOUT SOURCE
+      # ==========================================
+
+      - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
+          ref: main
           path: kernel
+          fetch-depth: 0
 
-      - name: Install dependencies
+      # ==========================================
+      # DEPENDENCIES
+      # ==========================================
+
+      - name: Install Dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             bc bison build-essential flex \
             git curl wget zip unzip \
             libssl-dev libelf-dev \
+            libncurses-dev libxml2-utils \
             python3 python3-pip \
-            clang llvm lld pahole \
-            device-tree-compiler rsync \
-            binutils
+            pahole dwarves \
+            lz4 zstd \
+            device-tree-compiler \
+            rsync ccache \
+            binutils \
+            zlib1g-dev \
+            libzstd-dev
 
-          # Pastikan ld.lld tersedia
-          if ! command -v ld.lld >/dev/null 2>&1; then
-            if command -v ld.lld-18 >/dev/null 2>&1; then
-              sudo ln -sf "$(command -v ld.lld-18)" /usr/bin/ld.lld
-            elif command -v ld.lld-17 >/dev/null 2>&1; then
-              sudo ln -sf "$(command -v ld.lld-17)" /usr/bin/ld.lld
-            elif command -v ld.lld-16 >/dev/null 2>&1; then
-              sudo ln -sf "$(command -v ld.lld-16)" /usr/bin/ld.lld
-            else
-              echo "ERROR: ld.lld not found after installing lld"
-              ls -l /usr/bin/ld* || true
-              exit 1
-            fi
-          fi
+      # ==========================================
+      # NEUTRON CLANG 23
+      # ==========================================
 
-          echo "=== Toolchain check ==="
+      - name: Install Neutron Clang 23
+        run: |
+          mkdir -p "$TC_DIR"
+          cd "$TC_DIR"
+
+          curl -fL \
+            https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman \
+            -o antman
+
+          chmod +x antman
+
+          echo "===== INSTALL NEUTRON ====="
+          ./antman -S="$NEUTRON_TAG"
+
+          echo "===== GLIBC COMPATIBILITY ====="
+          ./antman --patch=glibc
+
+          echo "$TC_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Neutron Compiler
+        run: |
+          export PATH="$TC_DIR/bin:$PATH"
+
+          echo "===== CLANG VERSION ====="
+          clang --version
+
+          echo "===== LLD VERSION ====="
+          ld.lld --version
+
+          clang --version | grep -q '23.0.0' || {
+            echo "ERROR: Neutron Clang 23 not detected"
+            exit 1
+          }
+
           command -v clang
           command -v ld.lld
-          ld.lld --version | head -n1
-          clang --version | head -n1
 
-      - name: Clone Malachite device tree
+      # ==========================================
+      # ANYKERNEL3
+      # ==========================================
+
+      - name: Clone AnyKernel3
         run: |
           git clone --depth=1 \
-            https://github.com/malachite-project/android_device_xiaomi_malachite.git \
-            device_tree
+            https://github.com/osm0sis/AnyKernel3.git \
+            AnyKernel3
 
-      - name: Check sources
+      # ==========================================
+      # RE-KERNEL AUDIT
+      # ==========================================
+
+      - name: Clone Re-Kernel
         run: |
-          echo "===== KERNEL ====="
+          git clone --depth=1 \
+            https://github.com/Sakion-Team/Re-Kernel.git \
+            re-kernel
+
+      - name: Audit Re-Kernel Compatibility
+        run: |
+          mkdir -p audit
+
+          REPORT="audit/re-kernel-audit.txt"
+
+          {
+            echo "===== RE-KERNEL AUDIT ====="
+            echo "Repository: Sakion-Team/Re-Kernel"
+            echo "Kernel target: GKI 6.1.174"
+            echo
+
+            echo "===== COMMIT ====="
+            git -C re-kernel log -1 --oneline
+
+            echo
+            echo "===== DEVICE SUPPORT ====="
+
+            if [ -d re-kernel/Supports ]; then
+              grep -RniE \
+                'malachite|missi' \
+                re-kernel/Supports || \
+                echo "No explicit Malachite/missi entry found."
+            else
+              echo "Supports directory not found."
+            fi
+
+            echo
+            echo "===== INTEGRATION METHOD ====="
+            grep -n -A 12 \
+              'Method 1: Recommendation' \
+              re-kernel/README.md || true
+
+            echo
+            echo "===== AUDIT RESULT ====="
+            echo "Audit only. No Re-Kernel source patches applied."
+            echo "GKI 6.1 integration should use the compatible module route."
+          } | tee "$REPORT"
+
+      # ==========================================
+      # GOOGLE BBRv3 ANDROID 14 - 6.1 BACKPORT
+      # ==========================================
+
+      - name: Clone BBRv3 Backport
+        run: |
+          git clone --depth=1 \
+            https://github.com/WildKernels/kernel_patches.git \
+            kernel_patches
+
+          echo "===== BBR PATCH REPOSITORY ====="
+          git -C kernel_patches log -1 --oneline
+
+          PATCH="kernel_patches/common/bbrv3/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch"
+
+          test -s "$PATCH" || {
+            echo "ERROR: Android 14 GKI 6.1 BBRv3 patch not found"
+            exit 1
+          }
+
+          echo "BBRv3 patch found."
+
+      - name: Verify Kernel Base
+        run: |
           cd kernel
+
+          echo "===== KERNEL VERSION ====="
           make -s kernelversion
+
+          VERSION=$(make -s kernelversion)
+
+          if [ "$VERSION" != "6.1.174" ]; then
+            echo "ERROR: Expected 6.1.174, found $VERSION"
+            exit 1
+          fi
+
+          echo "===== KERNEL COMMIT ====="
           git log -1 --oneline
 
-          echo "===== DEFCONFIG ====="
-          find arch/arm64/configs -name '*defconfig'
+          echo "===== TCP SOURCE ====="
+          test -s net/ipv4/tcp.c
+          test -s net/ipv4/tcp_input.c
+          test -s net/ipv4/Kconfig
+          test -s net/ipv4/Makefile
 
-          echo "===== DEVICE TREE ====="
-          cd ../device_tree
-          git log -1 --oneline
-          find . -maxdepth 3 -type f | head -100
+      - name: Apply BBRv3 Android 6.1 Patch
+        run: |
+          cd kernel
+
+          PATCH="../kernel_patches/common/bbrv3/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch"
+
+          echo "===== BBRv3 DRY RUN ====="
+
+          patch --dry-run \
+            --forward \
+            -p1 \
+            -i "$PATCH"
+
+          echo "===== APPLY BBRv3 ====="
+
+          patch --forward \
+            -p1 \
+            -i "$PATCH"
+
+          echo "===== VERIFY BBRv3 FILES ====="
+
+          test -s net/ipv4/tcp_bbr3.c
+          test -s net/ipv4/tcp_plb.c
+
+          grep -n 'TCP_CONG_BBR3' \
+            net/ipv4/Kconfig
+
+          grep -n 'tcp_bbr3.o' \
+            net/ipv4/Makefile
+
+          git diff --check
+
+          echo "BBRv3 backport applied successfully."
+
+      # ==========================================
+      # GKI CONFIGURATION
+      # ==========================================
 
       - name: Configure GKI Defconfig
         run: |
           cd kernel
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
 
-      - name: Build kernel
+          make O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            gki_defconfig
+
+      # ==========================================
+      # MALACHITEOPT OPTIMIZATIONS
+      # ==========================================
+
+      - name: Apply MalachiteOpt Configuration
         run: |
           cd kernel
+
+          CFG="out/.config"
+
+          echo "===== THINLTO ====="
+
+          ./scripts/config --file "$CFG" \
+            -e LTO \
+            -e LTO_CLANG \
+            -e LTO_CLANG_THIN
+
+          echo "===== BBRv3 ====="
+
+          ./scripts/config --file "$CFG" \
+            -e TCP_CONG_BBR3 \
+            -e DEFAULT_BBR3 \
+            -e NET_SCH_FQ
+
+          echo "===== ZRAM LZ4 ====="
+
+          ./scripts/config --file "$CFG" \
+            -e ZRAM \
+            -e ZRAM_DEF_COMP_LZ4 \
+            -e LZ4_COMPRESS \
+            -e LZ4_DECOMPRESS
+
+          echo "===== MEMORY MANAGEMENT ====="
+
+          ./scripts/config --file "$CFG" \
+            -e PSI
+
+          echo "===== POWER MANAGEMENT ====="
+
+          ./scripts/config --file "$CFG" \
+            -e CPU_IDLE \
+            -e WQ_POWER_EFFICIENT_DEFAULT
+
+          echo "===== DISABLE BORE ====="
+
+          ./scripts/config --file "$CFG" \
+            -d SCHED_BORE
+
+          echo "===== RESOLVE CONFIGURATION ====="
+
+          make O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+          echo "===== VERIFY REQUIRED CONFIG ====="
+
+          grep -E \
+            '^CONFIG_(LTO_CLANG_THIN|TCP_CONG_BBR3|DEFAULT_BBR3|NET_SCH_FQ|ZRAM|ZRAM_DEF_COMP_LZ4|LZ4_COMPRESS|LZ4_DECOMPRESS|PSI|CPU_IDLE|WQ_POWER_EFFICIENT_DEFAULT)=' \
+            "$CFG" || true
+
+          grep -q '^CONFIG_TCP_CONG_BBR3=y' "$CFG" || {
+            echo "ERROR: BBRv3 configuration missing"
+            exit 1
+          }
+
+          grep -q '^CONFIG_ZRAM=y' "$CFG" || {
+            echo "ERROR: ZRAM is not enabled"
+            exit 1
+          }
+
+          grep -q '^CONFIG_ZRAM_DEF_COMP_LZ4=y' "$CFG" || {
+            echo "ERROR: ZRAM LZ4 is not enabled"
+            exit 1
+          }
+
+          if grep -q '^CONFIG_SCHED_BORE=y' "$CFG"; then
+            echo "ERROR: BORE must remain disabled"
+            exit 1
+          fi
+
+          echo "===== FINAL CONFIGURATION ====="
+          cp "$CFG" ../kernel-config.txt
+
+      # ==========================================
+      # COMPILE KERNEL
+      # ==========================================
+
+      - name: Compile MalachiteOpt Kernel
+        run: |
+          cd kernel
+
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
             LLVM=1 \
             LLVM_IAS=1 \
-            Image.gz \
-            dtbs \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image \
             modules
 
-      - name: Verify output
+      # ==========================================
+      # VERIFY BBRv3
+      # ==========================================
+
+      - name: Verify BBRv3 Compilation
         run: |
           cd kernel
-          test -s out/arch/arm64/boot/Image.gz
-          find out/arch/arm64/boot -type f
-          ls -lh out/arch/arm64/boot/Image.gz
 
-      - name: Package kernel
+          echo "===== BBRv3 OBJECT ====="
+
+          test -s out/net/ipv4/tcp_bbr3.o
+          ls -lh out/net/ipv4/tcp_bbr3.o
+
+          echo "===== TCP PLB OBJECT ====="
+
+          test -s out/net/ipv4/tcp_plb.o
+          ls -lh out/net/ipv4/tcp_plb.o
+
+          echo "===== BBRv3 REGISTRATION ====="
+
+          grep -n 'bbr3_register' net/ipv4/tcp_bbr3.c
+
+          echo "BBRv3 compilation verified."
+
+      # ==========================================
+      # VERIFY KERNEL AND MODULES
+      # ==========================================
+
+      - name: Verify Kernel Output
+        run: |
+          cd kernel
+
+          echo "===== IMAGE ====="
+
+          test -s out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+
+          echo "===== VMLINUX ====="
+
+          test -s out/vmlinux
+          ls -lh out/vmlinux
+
+          echo "===== MODULES ====="
+
+          find out -type f -name '*.ko' | head -100
+
+          echo "===== MODULE SYMBOLS ====="
+
+          if [ -s out/Module.symvers ]; then
+            echo "Module.symvers generated."
+          else
+            echo "WARNING: Module.symvers missing."
+          fi
+
+          echo "===== MODVERSIONS ====="
+
+          grep '^CONFIG_MODVERSIONS=' out/.config || true
+
+          echo "===== KMI FILES ====="
+
+          find . -maxdepth 4 -type f \
+            \( -name 'abi_gki_aarch64*' \
+            -o -name 'symbols.allowlist' \) \
+            -print
+
+          cp out/.config ../kernel-config.txt
+
+          {
+            echo "Kernel: $(make -s kernelversion)"
+            echo "Commit: $(git rev-parse HEAD)"
+            echo "Compiler:"
+            clang --version
+            echo "BBRv3: compiled"
+            echo "ZRAM: LZ4"
+            echo "Scheduler: BORE disabled"
+          } > ../build-info.txt
+
+      # ==========================================
+      # ANYKERNEL3 PACKAGE
+      # ==========================================
+
+      - name: Prepare AnyKernel3
         run: |
           mkdir -p release
-          cp kernel/out/arch/arm64/boot/Image.gz release/
 
-          cd release
-          zip -r Malachite-GKI-6.1.zip .
+          cp kernel/out/arch/arm64/boot/Image \
+            AnyKernel3/Image
 
-      - name: Upload artifact
+          cat << 'AK3EOF' > AnyKernel3/anykernel.sh
+          properties() { '
+          kernel.string=MalachiteOpt GKI 6.1.174
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=malachite
+          device.name2=missi
+          supported.versions=
+          '; }
+
+          block=boot;
+          is_slot_device=auto;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          AK3EOF
+
+          echo "===== ANYKERNEL3 IMAGE ====="
+          ls -lh AnyKernel3/Image
+
+      - name: Pack AnyKernel3 ZIP
+        run: |
+          cd AnyKernel3
+
+          zip -r9 \
+            ../release/MalachiteOpt-GKI-6.1.174.zip . \
+            -x '.git/*' \
+            -x 'README.md' \
+            -x '*placeholder*'
+
+      # ==========================================
+      # FINAL VERIFICATION
+      # ==========================================
+
+      - name: Verify Final Package
+        run: |
+          test -s release/MalachiteOpt-GKI-6.1.174.zip
+
+          echo "===== FINAL ZIP ====="
+          ls -lh release/MalachiteOpt-GKI-6.1.174.zip
+
+          echo "===== ZIP CONTENTS ====="
+
+          unzip -l \
+            release/MalachiteOpt-GKI-6.1.174.zip
+
+          echo "===== BBRv3 SOURCE ====="
+          grep -n 'CONFIG_TCP_CONG_BBR3=y' kernel-config.txt
+
+          echo "===== ZRAM LZ4 ====="
+          grep -n 'CONFIG_ZRAM_DEF_COMP_LZ4=y' kernel-config.txt
+
+          echo "===== BORE CHECK ====="
+          if grep -q '^CONFIG_SCHED_BORE=y' kernel-config.txt; then
+            exit 1
+          fi
+
+      # ==========================================
+      # UPLOAD ARTIFACTS
+      # ==========================================
+
+      - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Malachite-GKI-6.1
-          path: release/Malachite-GKI-6.1.zip
+          name: MalachiteOpt-GKI-6.1.174
+          path: release/MalachiteOpt-GKI-6.1.174.zip
+          retention-days: 14
+
+      - name: Upload Kernel Configuration
+        uses: actions/upload-artifact@v4
+        with:
+          name: MalachiteOpt-GKI-6.1.174-Config
+          path: kernel-config.txt
+          retention-days: 14
+
+      - name: Upload Build and Re-Kernel Audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: MalachiteOpt-Build-Audit
+          path: |
+            build-info.txt
+            audit/re-kernel-audit.txt
           retention-days: 14
