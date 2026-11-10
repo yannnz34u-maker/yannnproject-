@@ -1,4 +1,5 @@
-name: YannzProject - Malachite GKI 6.1.174
+
+name: Specter-Malachite - GKI 6.1.174
 
 on:
   workflow_dispatch:
@@ -7,8 +8,14 @@ on:
         description: "Enable SUSFS"
         type: boolean
         default: true
-      enable_rekernel:
-        description: "Enable Re-Kernel"
+
+      enable_bbrv3:
+        description: "Try BBRv3 (automatic fallback to BBR)"
+        type: boolean
+        default: true
+
+      enable_thermal_profile:
+        description: "Enable Step-Wise thermal governor support"
         type: boolean
         default: true
 
@@ -17,7 +24,7 @@ permissions:
 
 jobs:
   build:
-    name: Malachite GKI 6.1.174
+    name: Specter-Malachite GKI 6.1.174
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -36,6 +43,7 @@ jobs:
             /opt/ghc \
             /opt/hostedtoolcache/CodeQL
           df -h /
+
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -48,115 +56,290 @@ jobs:
             pahole lz4 kmod \
             device-tree-compiler \
             rsync ccache patch
+
       - name: Clone AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          git clone --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
       - name: Install KernelSU-Next
         run: |
+          set -e
           cd kernel
-          git clone --depth=1 -b dev-susfs https://github.com/pershoot/KernelSU-Next.git KernelSU-Next
-          sed -i '/bool is_manager_apk/{n;s/.*/{\n\treturn true;/}' KernelSU-Next/kernel/manager/apk_sign.c
+
+          git clone --depth=1 -b dev-susfs \
+            https://github.com/pershoot/KernelSU-Next.git KernelSU-Next
+
           ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
-          grep -q 'kernelsu/' drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          grep -q 'kernelsu/' drivers/Makefile || \
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+            sed -i '$a source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
       - name: Install SUSFS
         if: ${{ inputs.enable_susfs }}
         run: |
+          set -e
           cd kernel
-          git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/pershoot/susfs4ksu.git susfs_src
+
+          git clone --depth=1 -b gki-android14-6.1 \
+            https://gitlab.com/pershoot/susfs4ksu.git susfs_src
+
           cp -f susfs_src/kernel_patches/fs/susfs.c fs/
           cp -f susfs_src/kernel_patches/include/linux/susfs.h include/linux/
           cp -f susfs_src/kernel_patches/include/linux/susfs_def.h include/linux/
-          patch -p1 --forward -r - < susfs_src/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch || true
+
+          patch -p1 --forward \
+            < susfs_src/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+
           rm -f android/abi_gki_protected_exports_*
-      - name: Install Re-Kernel
-        if: ${{ inputs.enable_rekernel }}
-        run: |
-          cd kernel
-          git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git rekernel_repo
-          bash rekernel_repo/Integrate/patches.sh || true
+
       - name: Verify Kernel Source
         run: |
           cd kernel
           echo "===== KERNEL VERSION ====="
           make -s kernelversion
           git log -1 --oneline
+
       - name: Configure GKI Defconfig
         run: |
+          set -e
           cd kernel
+
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+
           ./scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Specter-Malachite" \
             -d MODULE_SIG_PROTECT \
-            -e KSU \
-            -e KSU_SUSFS \
-            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-            -e KSU_SUSFS_SUS_PATH \
-            -e KSU_SUSFS_SUS_MOUNT \
-            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-            -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SUS_OVERLAYFS \
-            -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SPOOF_UNAME \
-            -e KSU_SUSFS_ENABLE_LOG \
-            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            -e KSU_SUSFS_OPEN_REDIRECT \
-            -e KSU_SUSFS_SUS_MAP \
-            -e REKERNEL \
-            -d REKERNEL_NETWORK
+            -e MODULES \
+            -e MODULE_UNLOAD \
+            -d MODULE_SIG_FORCE \
+            -e KSU
+
+          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e KSU_SUSFS \
+              -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+              -e KSU_SUSFS_SUS_PATH \
+              -e KSU_SUSFS_SUS_MOUNT \
+              -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+              -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+              -e KSU_SUSFS_SUS_KSTAT \
+              -e KSU_SUSFS_SUS_OVERLAYFS \
+              -e KSU_SUSFS_TRY_UMOUNT \
+              -e KSU_SUSFS_SPOOF_UNAME \
+              -e KSU_SUSFS_ENABLE_LOG \
+              -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+              -e KSU_SUSFS_OPEN_REDIRECT \
+              -e KSU_SUSFS_SUS_MAP
+          fi
+
+          # TCP BBR
+          ./scripts/config --file out/.config \
+            -e TCP_CONG_BBR \
+            -e DEFAULT_BBR \
+            -e NET_SCH_FQ
+
+          # Hardware thermal protection
+          ./scripts/config --file out/.config \
+            -e THERMAL
+
+          if [ "${{ inputs.enable_thermal_profile }}" = "true" ]; then
+            echo "Step-Wise thermal governor: ON"
+            ./scripts/config --file out/.config \
+              -e THERMAL_GOV_STEP_WISE
+          else
+            echo "Step-Wise thermal governor: OFF"
+          fi
+
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
           echo "===== FINAL CONFIG ====="
-          grep -E '^CONFIG_(KSU|KSU_SUSFS|REKERNEL)=' out/.config || true
+          grep -E '^CONFIG_(LOCALVERSION|KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|THERMAL|THERMAL_GOV_STEP_WISE)=' out/.config || true
+
+          grep -q '^CONFIG_THERMAL=y' out/.config || {
+            echo "::error::Thermal protection is required!"
+            exit 1
+          }
+
+      - name: Try BBRv3 With Automatic BBR Fallback
+        run: |
+          set -e
+          cd kernel
+
+          ORIGINAL="net/ipv4/tcp_bbr.c"
+          BACKUP="$RUNNER_TEMP/tcp_bbr_v1.c"
+
+          cp "$ORIGINAL" "$BACKUP"
+
+          if [ "${{ inputs.enable_bbrv3 }}" = "true" ]; then
+
+            echo "===== TRYING GOOGLE BBRv3 ====="
+
+            if curl -fL \
+              https://raw.githubusercontent.com/google/bbr/v3/net/ipv4/tcp_bbr.c \
+              -o "$RUNNER_TEMP/tcp_bbr_v3.c"; then
+
+              cp "$RUNNER_TEMP/tcp_bbr_v3.c" "$ORIGINAL"
+
+              if make -j"$(nproc)" \
+                O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                net/ipv4/tcp_bbr.o; then
+
+                echo "BBRv3 object compilation successful"
+                echo "BBR_VARIANT=BBRv3" >> "$GITHUB_ENV"
+
+              else
+                echo "::warning::BBRv3 incompatible; restoring original BBR"
+
+                cp "$BACKUP" "$ORIGINAL"
+
+                rm -f out/net/ipv4/tcp_bbr.o \
+                  out/net/ipv4/.tcp_bbr.o.cmd
+
+                make -j"$(nproc)" \
+                  O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                  net/ipv4/tcp_bbr.o
+
+                echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
+              fi
+
+            else
+              echo "::warning::Unable to download BBRv3; using BBR"
+              cp "$BACKUP" "$ORIGINAL"
+              echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
+            fi
+
+          else
+            echo "BBRv3 disabled; using original BBR"
+            echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
+          fi
+
+      - name: Final Kernel Configuration
+        run: |
+          set -e
+          cd kernel
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+          echo "===== FINAL NETWORK CONFIG ====="
+          grep -E 'CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)' out/.config || true
+
       - name: Compile GKI Kernel
         run: |
+          set -e
           cd kernel
+
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             Image
+
+          echo "===== BUILD SUCCESS ====="
+          echo "BBR: $BBR_VARIANT"
+
       - name: Verify Kernel Image Output
         run: |
+          set -e
+
           test -s kernel/out/arch/arm64/boot/Image
-          echo "===== KERNEL OUTPUT SIZE ====="
+
+          echo "===== KERNEL OUTPUT ====="
           ls -lh kernel/out/arch/arm64/boot/Image
+
       - name: Prepare AnyKernel3
         run: |
           set -e
+
           mkdir -p release
+
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
-          cat << 'AK3EOF' > AnyKernel3/anykernel.sh
-          properties() { '
-          kernel.string=YannzProject GKI 6.1.174 (Universal Malachite)
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=malachite
-          device.name2=missi
-          supported.versions=
-          '; }
+
+          cat > AnyKernel3/anykernel.sh <<'AK3EOF'
+          properties() {
+            kernel.string=Specter-Malachite-GKI-6.1.174
+            do.devicecheck=1
+            do.modules=0
+            do.systemless=1
+            do.cleanup=1
+            do.cleanuponabort=0
+            device.name1=malachite
+            device.name2=missi
+            supported.versions=
+          }
+
           BLOCK=boot;
           IS_SLOT_DEVICE=auto;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
+
           . tools/ak3-core.sh;
+
+          ui_print " "
+          ui_print "  ____  ____  _____ ____ _____ _____ ____"
+          ui_print " / ___||  _ \| ____/ ___|_   _| ____|  _ \\"
+          ui_print " \___ \| |_) |  _| \___ \ | | |  _| | |_) |"
+          ui_print "  ___) |  __/| |___ ___) || | | |___|  _ <"
+          ui_print " |____/|_|   |_____|____/ |_| |_____|_| \_\\"
+          ui_print " "
+          ui_print "          MALACHITE"
+          ui_print " "
+          ui_print "       GKI 6.1.174"
+          ui_print "       POCO X7"
+          ui_print "       YANNZPROJECT"
+          ui_print " "
+
           split_boot;
           flash_boot;
+
+          ui_print " "
+          ui_print "  Specter-Malachite installed!"
+          ui_print "  Reboot your device."
+          ui_print " "
+
           AK3EOF
+
       - name: Pack AnyKernel3 ZIP
         run: |
+          set -e
           cd AnyKernel3
-          zip -r9 ../release/YannzProject-Malachite-GKI-6.1.174.zip . \
+
+          zip -r9 ../release/Specter-Malachite-GKI-6.1.174.zip . \
             -x '.git/*' \
             -x 'README.md' \
             -x '*placeholder*'
+
+      - name: Generate Build Information
+        run: |
+          mkdir -p release
+
+          cat > release/BUILD_INFO.txt <<EOF
+          Project: Specter-Malachite
+          Device: Xiaomi Malachite / POCO X7
+          Kernel: GKI 6.1.174
+          Compiler: Ubuntu LLVM/Clang
+          BBR: $BBR_VARIANT
+          SUSFS: ${{ inputs.enable_susfs }}
+          Thermal Profile: ${{ inputs.enable_thermal_profile }}
+          Thermal Protection: ENABLED
+          Localversion: -Specter-Malachite
+          EOF
+
       - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: YannzProject-Malachite-GKI-6.1.174
-          path: release/YannzProject-Malachite-GKI-6.1.174.zip
+          name: Specter-Malachite-GKI-6.1.174
+          path: release/Specter-Malachite-GKI-6.1.174.zip
+          retention-days: 14
+
+      - name: Upload Build Information
+        uses: actions/upload-artifact@v4
+        with:
+          name: Specter-Malachite-Build-Info
+          path: release/BUILD_INFO.txt
           retention-days: 14
