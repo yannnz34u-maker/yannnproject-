@@ -4,18 +4,8 @@ name: Specter-Malachite - GKI 6.1.174
 on:
   workflow_dispatch:
     inputs:
-      enable_susfs:
-        description: "Enable SUSFS"
-        type: boolean
-        default: true
-
       enable_bbrv3:
-        description: "Try BBRv3 (automatic fallback to BBR)"
-        type: boolean
-        default: true
-
-      enable_thermal_profile:
-        description: "Enable Step-Wise thermal governor support"
+        description: "Enable BBRv3 with automatic BBR fallback"
         type: boolean
         default: true
 
@@ -29,12 +19,14 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # Checkout
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
           ref: main
           path: kernel
 
+      # Free Disk
       - name: Free Disk Space
         run: |
           sudo rm -rf \
@@ -44,6 +36,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # Dependencies
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -57,52 +50,25 @@ jobs:
             device-tree-compiler \
             rsync ccache patch
 
+      # AnyKernel3
       - name: Clone AnyKernel3
         run: |
           git clone --depth=1 \
             https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-      - name: Install KernelSU-Next
-        run: |
-          set -e
-          cd kernel
-
-          git clone --depth=1 -b dev-susfs \
-            https://github.com/pershoot/KernelSU-Next.git KernelSU-Next
-
-          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
-
-          grep -q 'kernelsu/' drivers/Makefile || \
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-
-          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
-            sed -i '$a source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-
-      - name: Install SUSFS
-        if: ${{ inputs.enable_susfs }}
-        run: |
-          set -e
-          cd kernel
-
-          git clone --depth=1 -b gki-android14-6.1 \
-            https://gitlab.com/pershoot/susfs4ksu.git susfs_src
-
-          cp -f susfs_src/kernel_patches/fs/susfs.c fs/
-          cp -f susfs_src/kernel_patches/include/linux/susfs.h include/linux/
-          cp -f susfs_src/kernel_patches/include/linux/susfs_def.h include/linux/
-
-          patch -p1 --forward \
-            < susfs_src/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-
-          rm -f android/abi_gki_protected_exports_*
-
+      # Verify Source
       - name: Verify Kernel Source
         run: |
+          set -e
           cd kernel
+
           echo "===== KERNEL VERSION ====="
           make -s kernelversion
+
+          echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
 
+      # Kernel Configuration
       - name: Configure GKI Defconfig
         run: |
           set -e
@@ -116,55 +82,16 @@ jobs:
             -e MODULES \
             -e MODULE_UNLOAD \
             -d MODULE_SIG_FORCE \
-            -e KSU
-
-          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e KSU_SUSFS \
-              -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-              -e KSU_SUSFS_SUS_PATH \
-              -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-              -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT \
-              -e KSU_SUSFS_SUS_OVERLAYFS \
-              -e KSU_SUSFS_TRY_UMOUNT \
-              -e KSU_SUSFS_SPOOF_UNAME \
-              -e KSU_SUSFS_ENABLE_LOG \
-              -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-              -e KSU_SUSFS_OPEN_REDIRECT \
-              -e KSU_SUSFS_SUS_MAP
-          fi
-
-          # TCP BBR
-          ./scripts/config --file out/.config \
             -e TCP_CONG_BBR \
             -e DEFAULT_BBR \
             -e NET_SCH_FQ
 
-          # Hardware thermal protection
-          ./scripts/config --file out/.config \
-            -e THERMAL
-
-          if [ "${{ inputs.enable_thermal_profile }}" = "true" ]; then
-            echo "Step-Wise thermal governor: ON"
-            ./scripts/config --file out/.config \
-              -e THERMAL_GOV_STEP_WISE
-          else
-            echo "Step-Wise thermal governor: OFF"
-          fi
-
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-          echo "===== FINAL CONFIG ====="
-          grep -E '^CONFIG_(LOCALVERSION|KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|THERMAL|THERMAL_GOV_STEP_WISE)=' out/.config || true
+          echo "===== NETWORK CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
 
-          grep -q '^CONFIG_THERMAL=y' out/.config || {
-            echo "::error::Thermal protection is required!"
-            exit 1
-          }
-
+      # BBRv3
       - name: Try BBRv3 With Automatic BBR Fallback
         run: |
           set -e
@@ -176,7 +103,6 @@ jobs:
           cp "$ORIGINAL" "$BACKUP"
 
           if [ "${{ inputs.enable_bbrv3 }}" = "true" ]; then
-
             echo "===== TRYING GOOGLE BBRv3 ====="
 
             if curl -fL \
@@ -208,7 +134,7 @@ jobs:
               fi
 
             else
-              echo "::warning::Unable to download BBRv3; using BBR"
+              echo "::warning::Unable to download BBRv3; using original BBR"
               cp "$BACKUP" "$ORIGINAL"
               echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
             fi
@@ -218,6 +144,7 @@ jobs:
             echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
           fi
 
+      # Final Configuration
       - name: Final Kernel Configuration
         run: |
           set -e
@@ -226,8 +153,9 @@ jobs:
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "===== FINAL NETWORK CONFIG ====="
-          grep -E 'CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)' out/.config || true
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
 
+      # Compile
       - name: Compile GKI Kernel
         run: |
           set -e
@@ -243,6 +171,7 @@ jobs:
           echo "===== BUILD SUCCESS ====="
           echo "BBR: $BBR_VARIANT"
 
+      # Verify Image
       - name: Verify Kernel Image Output
         run: |
           set -e
@@ -252,6 +181,7 @@ jobs:
           echo "===== KERNEL OUTPUT ====="
           ls -lh kernel/out/arch/arm64/boot/Image
 
+      # Prepare AnyKernel3
       - name: Prepare AnyKernel3
         run: |
           set -e
@@ -301,9 +231,9 @@ jobs:
           ui_print "  Specter-Malachite installed!"
           ui_print "  Reboot your device."
           ui_print " "
-
           AK3EOF
 
+      # Package ZIP
       - name: Pack AnyKernel3 ZIP
         run: |
           set -e
@@ -314,6 +244,7 @@ jobs:
             -x 'README.md' \
             -x '*placeholder*'
 
+      # Build Information
       - name: Generate Build Information
         run: |
           mkdir -p release
@@ -323,13 +254,13 @@ jobs:
           Device: Xiaomi Malachite / POCO X7
           Kernel: GKI 6.1.174
           Compiler: Ubuntu LLVM/Clang
+          Architecture: ARM64
           BBR: $BBR_VARIANT
-          SUSFS: ${{ inputs.enable_susfs }}
-          Thermal Profile: ${{ inputs.enable_thermal_profile }}
-          Thermal Protection: ENABLED
           Localversion: -Specter-Malachite
+          Package: AnyKernel3
           EOF
 
+      # Upload Kernel
       - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -337,6 +268,7 @@ jobs:
           path: release/Specter-Malachite-GKI-6.1.174.zip
           retention-days: 14
 
+      # Upload Build Info
       - name: Upload Build Information
         uses: actions/upload-artifact@v4
         with:
