@@ -23,6 +23,10 @@ on:
         description: "Jadikan BBR default TCP congestion control"
         type: boolean
         default: true
+      rekernel:
+        description: "Build modul Re:Kernel (LKM) sebagai zip KSU terpisah"
+        type: boolean
+        default: true
       gpu_oc:
         description: "GPU: aktifkan overclock"
         type: boolean
@@ -59,7 +63,7 @@ env:
 
 jobs:
   build:
-    name: Build MalachiteOpt GKI 6.1.174 + AnyKernel3
+    name: Build YannnzKernel GKI 6.1.174 + AnyKernel3
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -84,7 +88,7 @@ jobs:
             libssl-dev libelf-dev \
             python3 python3-pip \
             clang llvm lld \
-            pahole lz4 \
+            pahole lz4 kmod \
             device-tree-compiler \
             rsync ccache
 
@@ -295,10 +299,17 @@ jobs:
               -e NET_SCH_FQ
           fi
 
+          if [ "${{ inputs.rekernel }}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e MODULES \
+              -e MODULE_UNLOAD \
+              -d MODULE_SIG_FORCE
+          fi
+
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "===== CONFIG CHECK ====="
-          grep -E '^CONFIG_(KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_TCP_CONG)=' out/.config || true
+          grep -E '^CONFIG_(KSU|KSU_SUSFS|TCP_CONG_BBR|DEFAULT_TCP_CONG|MODULES|MODVERSIONS|MODULE_SIG_FORCE)=' out/.config || true
 
       - name: Compile GKI Kernel
         if: ${{ !inputs.scan_only }}
@@ -324,6 +335,30 @@ jobs:
           ls -lh kernel/out/arch/arm64/boot/Image
           strings kernel/out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
 
+      - name: Build Re:Kernel LKM
+        if: ${{ !inputs.scan_only && inputs.rekernel }}
+        continue-on-error: true
+        run: |
+          git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git Re-Kernel
+          SRC="$(find Re-Kernel/LKM-Source -name Makefile -print -quit | xargs -r dirname)"
+          if [ -z "$SRC" ]; then
+            echo "::warning::Makefile di Re-Kernel/LKM-Source tidak ditemukan"
+            find Re-Kernel/LKM-Source | head -30
+            exit 1
+          fi
+          echo "LKM source: $SRC"
+
+          make -C kernel O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
+          make -C kernel O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            M="$GITHUB_WORKSPACE/$SRC" modules
+
+          KO="$(find "$SRC" -name '*.ko' -print -quit)"
+          test -n "$KO" || { echo "::warning::re-kernel.ko tidak terbentuk"; exit 1; }
+          mkdir -p rekernel-mod
+          cp "$KO" rekernel-mod/re-kernel.ko
+          modinfo rekernel-mod/re-kernel.ko | head -10 || true
+          echo "REKERNEL_OK=1" >> "$GITHUB_ENV"
+
       - name: Prepare AnyKernel3 Package
         if: ${{ !inputs.scan_only }}
         run: |
@@ -331,9 +366,25 @@ jobs:
           rm -rf AnyKernel3/.git AnyKernel3/Image* AnyKernel3/ramdisk AnyKernel3/modules 2>/dev/null || true
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
+          cat << 'BNEOF' | sed 's/ /\xe2\xa0\x80/g' > AnyKernel3/banner
+          #   #  ###  #   # #   # #   # #####
+          #   # #   # ##  # ##  # ##  #    #
+           # #  ##### # # # # # # # # #   #
+            #   #   # #  ## #  ## #  ##  #
+            #   #   # #   # #   # #   # #####
+
+          #   # ##### ####  #   # ##### #
+          #  #  #     #   # ##  # #     #
+          ###   ####  ####  # # # ####  #
+          #  #  #     #  #  #  ## #     #
+          #   # ##### #   # #   # ##### #####
+
+          GKI 6.1.174 | Malachite
+          BNEOF
+
           cat << 'AK3EOF' > AnyKernel3/anykernel.sh
           properties() { '
-          kernel.string=MalachiteOpt GKI 6.1.174 (Malachite)
+          kernel.string=YannnzKernel GKI 6.1.174 (Malachite)
           do.devicecheck=1
           do.modules=0
           do.systemless=0
@@ -369,6 +420,33 @@ jobs:
           sha256sum ${ZIP_NAME}.zip | tee ${ZIP_NAME}.zip.sha256
           md5sum ${ZIP_NAME}.zip | tee ${ZIP_NAME}.zip.md5
 
+      - name: Pack Re:Kernel module (KSU)
+        if: ${{ !inputs.scan_only && inputs.rekernel && env.REKERNEL_OK == '1' }}
+        run: |
+          cd rekernel-mod
+
+          cat << 'EOF' > module.prop
+          id=yannnz_rekernel
+          name=Re:Kernel LKM (YannnzKernel)
+          version=6.1.174
+          versionCode=1
+          author=yannnz
+          description=Re:Kernel loadable module untuk YannnzKernel GKI 6.1.174 (malachite)
+          EOF
+
+          cat << 'EOF' > service.sh
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
+          sleep 10
+          lsmod | grep -q 're.kernel' || insmod "$MODDIR/re-kernel.ko"
+          EOF
+          chmod 755 service.sh
+
+          zip -r9 ../release/Re-Kernel-LKM-YannnzKernel.zip .
+          cd ../release
+          sha256sum Re-Kernel-LKM-YannnzKernel.zip | tee Re-Kernel-LKM-YannnzKernel.zip.sha256
+
       - name: Upload Build Log
         if: ${{ always() && !inputs.scan_only }}
         uses: actions/upload-artifact@v4
@@ -389,6 +467,16 @@ jobs:
             release/${{ env.ZIP_NAME }}.zip.md5
           retention-days: 14
 
+      - name: Upload Re:Kernel module Artifact
+        if: ${{ !inputs.scan_only && inputs.rekernel && env.REKERNEL_OK == '1' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Re-Kernel-LKM-YannnzKernel
+          path: |
+            release/Re-Kernel-LKM-YannnzKernel.zip
+            release/Re-Kernel-LKM-YannnzKernel.zip.sha256
+          retention-days: 14
+
       - name: Create GitHub Release
         if: ${{ !inputs.scan_only && inputs.release }}
         env:
@@ -397,10 +485,7 @@ jobs:
         run: |
           KVER="$(make -C kernel -s kernelversion)"
           TAG="${TAG_IN:-v${KVER}-$(date +%Y%m%d-%H%M)}"
-          gh release create "$TAG" \
-            release/${ZIP_NAME}.zip \
-            release/${ZIP_NAME}.zip.sha256 \
-            release/${ZIP_NAME}.zip.md5 \
+          gh release create "$TAG" release/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "MalachiteOpt GKI ${KVER}" \
-            --notes "Kernel GKI ${KVER} untuk Poco X7 (malachite). KSU-Next: ${{ inputs.ksu }}, SUSFS: ${{ inputs.susfs }}, BBR: ${{ inputs.bbr }}. Flash lewat KernelSU manager / recovery. Verifikasi dengan file .sha256."
+            --title "YannnzKernel GKI ${KVER}" \
+            --notes "Kernel GKI ${KVER} untuk Poco X7 (malachite). KSU-Next: ${{ inputs.ksu }}, SUSFS: ${{ inputs.susfs }}, BBR: ${{ inputs.bbr }}, Re:Kernel: ${{ inputs.rekernel }}. Flash zip kernel lewat KernelSU manager / recovery, lalu (opsional) pasang zip Re-Kernel-LKM sebagai modul KSU. Verifikasi dengan file .sha256."
