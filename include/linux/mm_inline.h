@@ -220,6 +220,25 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 	VM_WARN_ON_ONCE(lru_gen_is_active(lruvec, old_gen) && !lru_gen_is_active(lruvec, new_gen));
 }
 
+static inline bool lru_gen_add_dst(struct lruvec *lruvec, struct folio *dst)
+{
+	int gen = folio_lru_gen(dst);
+	int type = folio_is_file_lru(dst);
+	int zone = folio_zonenum(dst);
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+
+	if (gen < 0)
+		return false;
+
+	lockdep_assert_held(&lruvec->lru_lock);
+	VM_WARN_ON_ONCE_FOLIO(folio_lruvec(dst) != lruvec, dst);
+
+	list_add_tail(&dst->lru, &lrugen->folios[gen][type][zone]);
+	lru_gen_update_size(lruvec, dst, -1, gen);
+
+	return true;
+}
+
 static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	unsigned long seq;
@@ -228,6 +247,11 @@ static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
 	int type = folio_is_file_lru(folio);
 	int zone = folio_zonenum(folio);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+	bool skip = false;
+
+	trace_android_vh_lru_gen_add_folio_skip(lruvec, folio, &skip);
+	if (skip)
+		return true;
 
 	VM_WARN_ON_ONCE_FOLIO(gen != -1, folio);
 
@@ -275,6 +299,11 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 {
 	unsigned long flags;
 	int gen = folio_lru_gen(folio);
+	bool skip = false;
+
+	trace_android_vh_lru_gen_del_folio_skip(lruvec, folio, &skip);
+	if (skip)
+		return true;
 
 	if (gen < 0)
 		return false;
@@ -293,6 +322,12 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 	return true;
 }
 
+static inline void folio_migrate_refs(struct folio *new, struct folio *old)
+{
+	unsigned long refs = READ_ONCE(old->flags) & LRU_REFS_MASK;
+
+	set_mask_bits(&new->flags, LRU_REFS_MASK, refs);
+}
 #else /* !CONFIG_LRU_GEN */
 
 static inline bool lru_gen_enabled(void)
@@ -301,6 +336,11 @@ static inline bool lru_gen_enabled(void)
 }
 
 static inline bool lru_gen_in_fault(void)
+{
+	return false;
+}
+
+static inline bool lru_gen_add_dst(struct lruvec *lruvec, struct folio *dst)
 {
 	return false;
 }
@@ -315,6 +355,10 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 	return false;
 }
 
+static inline void folio_migrate_refs(struct folio *new, struct folio *old)
+{
+
+}
 #endif /* CONFIG_LRU_GEN */
 
 static __always_inline
@@ -330,16 +374,11 @@ void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
 	if (lru_gen_add_folio(lruvec, folio, false))
 		return;
 
+	trace_android_vh_add_page_to_lrulist(folio, false, lru);
 	update_lru_size(lruvec, lru, folio_zonenum(folio),
 			folio_nr_pages(folio));
 	if (lru != LRU_UNEVICTABLE)
 		list_add(&folio->lru, &lruvec->lists[lru]);
-}
-
-static __always_inline void add_page_to_lru_list(struct page *page,
-				struct lruvec *lruvec)
-{
-	lruvec_add_folio(lruvec, page_folio(page));
 }
 
 static __always_inline
@@ -355,6 +394,7 @@ void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
 	if (lru_gen_add_folio(lruvec, folio, true))
 		return;
 
+	trace_android_vh_add_page_to_lrulist(folio, false, lru);
 	update_lru_size(lruvec, lru, folio_zonenum(folio),
 			folio_nr_pages(folio));
 	/* This is not expected to be used on LRU_UNEVICTABLE */
@@ -374,16 +414,11 @@ void lruvec_del_folio(struct lruvec *lruvec, struct folio *folio)
 	if (lru_gen_del_folio(lruvec, folio, false))
 		return;
 
+	trace_android_vh_del_page_from_lrulist(folio, false, lru);
 	if (lru != LRU_UNEVICTABLE)
 		list_del(&folio->lru);
 	update_lru_size(lruvec, lru, folio_zonenum(folio),
 			-folio_nr_pages(folio));
-}
-
-static __always_inline void del_page_from_lru_list(struct page *page,
-				struct lruvec *lruvec)
-{
-	lruvec_del_folio(lruvec, page_folio(page));
 }
 
 #ifdef CONFIG_ANON_VMA_NAME
@@ -436,8 +471,7 @@ static inline void free_anon_vma_name(struct vm_area_struct *vma)
 	 * Not using anon_vma_name because it generates a warning if mmap_lock
 	 * is not held, which might be the case here.
 	 */
-	if (!vma->vm_file)
-		anon_vma_name_put(vma->anon_name);
+	anon_vma_name_put(vma->anon_name);
 }
 
 static inline bool anon_vma_name_eq(struct anon_vma_name *anon_name1,
@@ -559,6 +593,27 @@ static inline bool mm_tlb_flush_nested(struct mm_struct *mm)
 	return atomic_read(&mm->tlb_flush_pending) > 1;
 }
 
+#ifdef CONFIG_MMU
+/*
+ * Computes the pte marker to copy from the given source entry into dst_vma.
+ * If no marker should be copied, returns 0.
+ * The caller should insert a new pte created with make_pte_marker().
+ */
+static inline pte_marker copy_pte_marker(
+		swp_entry_t entry, struct vm_area_struct *dst_vma)
+{
+	pte_marker srcm = pte_marker_get(entry);
+	/* Always copy error entries. */
+	pte_marker dstm = srcm & PTE_MARKER_POISONED;
+
+	/* Only copy PTE markers if UFFD register matches. */
+	if ((srcm & PTE_MARKER_UFFD_WP) && userfaultfd_wp(dst_vma))
+		dstm |= PTE_MARKER_UFFD_WP;
+
+	return dstm;
+}
+#endif
+
 /*
  * If this pte is wr-protected by uffd-wp in any form, arm the special pte to
  * replace a none pte.  NOTE!  This should only be called when *pte is already
@@ -579,8 +634,14 @@ pte_install_uffd_wp_if_needed(struct vm_area_struct *vma, unsigned long addr,
 	bool arm_uffd_pte = false;
 
 	/* The current status of the pte should be "cleared" before calling */
-	WARN_ON_ONCE(!pte_none(*pte));
+	WARN_ON_ONCE(!pte_none(ptep_get(pte)));
 
+	/*
+	 * NOTE: userfaultfd_wp_unpopulated() doesn't need this whole
+	 * thing, because when zapping either it means it's dropping the
+	 * page, or in TTU where the present pte will be quickly replaced
+	 * with a swap pte.  There's no way of leaking the bit.
+	 */
 	if (vma_is_anonymous(vma) || !userfaultfd_wp(vma))
 		return;
 

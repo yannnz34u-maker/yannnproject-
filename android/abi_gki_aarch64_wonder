@@ -20,13 +20,11 @@
   csum_partial
   debugfs_create_dir
   delayed_work_timer_fn
-  del_timer
-  del_timer_sync
   destroy_workqueue
   dev_addr_mod
   dev_close
   _dev_err
-  __dev_kfree_skb_any
+  dev_kfree_skb_any_reason
   __dev_queue_xmit
   eth_type_trans
   flush_delayed_work
@@ -44,10 +42,11 @@
   kmalloc_trace
   kmemdup
   kvfree_call_rcu
-  __list_add_valid
-  __list_del_entry_valid
+  __list_add_valid_or_report
+  __list_del_entry_valid_or_report
   __local_bh_enable_ip
   memcpy
+  memmove
   memset
   mod_timer
   module_layout
@@ -103,6 +102,8 @@
   synchronize_net
   synchronize_rcu
   system_wq
+  timer_delete
+  timer_delete_sync
   trace_event_buffer_commit
   trace_event_buffer_reserve
   trace_event_printf
@@ -112,14 +113,14 @@
   trace_raw_output_prep
   __trace_trigger_soft_disabled
   unregister_netdevice_notifier
-  unregister_netdevice_queue
+  utf8_data_table
   __warn_printk
 
 # required by cfg80211.ko
-  bpf_trace_run10
+  bpf_trace_run11
   bpf_trace_run7
   bpf_trace_run8
-  __class_register
+  class_register
   class_unregister
   _ctype
   debugfs_remove
@@ -147,7 +148,6 @@
   init_wait_entry
   __init_waitqueue_head
   kasan_flag_enabled
-  key_create_or_update
   key_put
   keyring_alloc
   kobject_uevent_env
@@ -200,10 +200,12 @@
   system_power_efficient_wq
   system_unbound_wq
   trace_print_array_seq
+  unregister_netdevice_queue
   unregister_pernet_device
   verify_pkcs7_signature
   __wake_up
   wireless_nlevent_flush
+  x509_load_certificate_list
 
 # required by mac80211.ko
   alloc_netdev_mqs
@@ -237,6 +239,8 @@
   _dev_info
   _dev_printk
   _dev_warn
+  drop_reasons_register_subsys
+  drop_reasons_unregister_subsys
   ether_setup
   eth_mac_addr
   ethtool_op_get_link
@@ -264,17 +268,13 @@
   ktime_get_with_offset
   kvfree
   kvmalloc_node
-  memmove
   napi_gro_receive
   netdev_info
   netdev_set_default_ethtool_ops
   netif_carrier_off
   netif_carrier_on
   netif_receive_skb_list
-  netif_tx_stop_all_queues
-  netif_tx_wake_queue
   net_ratelimit
-  nr_cpu_ids
   __per_cpu_offset
   preempt_schedule
   pskb_expand_head
@@ -293,18 +293,18 @@
   round_jiffies_up
   sg_init_one
   sg_init_table
-  skb_checksum_help
   skb_clone
   skb_clone_sk
   skb_complete_wifi_ack
   skb_copy
   skb_copy_expand
+  skb_csum_hwoffload_help
   skb_dequeue
   skb_ensure_writable
   __skb_get_hash
   __skb_gso_segment
   skb_queue_head
-  skb_queue_purge
+  skb_queue_purge_reason
   skb_queue_tail
   strncpy
   __sw_hweight64
@@ -315,7 +315,6 @@
   tasklet_unlock_wait
   unregister_inet6addr_notifier
   unregister_inetaddr_notifier
-  unregister_netdevice_many
   __usecs_to_jiffies
 
 # required by wonder.ko

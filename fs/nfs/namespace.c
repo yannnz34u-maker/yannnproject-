@@ -149,6 +149,7 @@ struct vfsmount *nfs_d_automount(struct path *path)
 	struct vfsmount *mnt = ERR_PTR(-ENOMEM);
 	struct nfs_server *server = NFS_SB(path->dentry->d_sb);
 	struct nfs_client *client = server->nfs_client;
+	unsigned long s_flags = path->dentry->d_sb->s_flags;
 	int timeout = READ_ONCE(nfs_mountpoint_expiry_timeout);
 	int ret;
 
@@ -178,6 +179,11 @@ struct vfsmount *nfs_d_automount(struct path *path)
 		put_net(fc->net_ns);
 		fc->net_ns = get_net(client->cl_net);
 	}
+
+	/* Inherit the flags covered by NFS_SB_MASK */
+	fc->sb_flags_mask |= NFS_SB_MASK;
+	fc->sb_flags &= ~NFS_SB_MASK;
+	fc->sb_flags |= s_flags & NFS_SB_MASK;
 
 	/* for submounts we want the same server; referrals will reassign */
 	memcpy(&ctx->nfs_server._address, &client->cl_addr, client->cl_addrlen);
@@ -217,23 +223,24 @@ out_fc:
 }
 
 static int
-nfs_namespace_getattr(struct user_namespace *mnt_userns,
+nfs_namespace_getattr(struct mnt_idmap *idmap,
 		      const struct path *path, struct kstat *stat,
 		      u32 request_mask, unsigned int query_flags)
 {
 	if (NFS_FH(d_inode(path->dentry))->size != 0)
-		return nfs_getattr(mnt_userns, path, stat, request_mask,
+		return nfs_getattr(idmap, path, stat, request_mask,
 				   query_flags);
-	generic_fillattr(&init_user_ns, d_inode(path->dentry), stat);
+	generic_fillattr(&nop_mnt_idmap, request_mask, d_inode(path->dentry),
+			 stat);
 	return 0;
 }
 
 static int
-nfs_namespace_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+nfs_namespace_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		      struct iattr *attr)
 {
 	if (NFS_FH(d_inode(dentry))->size != 0)
-		return nfs_setattr(mnt_userns, dentry, attr);
+		return nfs_setattr(idmap, dentry, attr);
 	return -EACCES;
 }
 
@@ -362,7 +369,7 @@ static int param_get_nfs_timeout(char *buffer, const struct kernel_param *kp)
 			num = (num + (HZ - 1)) / HZ;
 	} else
 		num = -1;
-	return scnprintf(buffer, PAGE_SIZE, "%li\n", num);
+	return sysfs_emit(buffer, "%li\n", num);
 }
 
 static const struct kernel_param_ops param_ops_nfs_timeout = {

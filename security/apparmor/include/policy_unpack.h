@@ -16,6 +16,7 @@
 #include <linux/dcache.h>
 #include <linux/workqueue.h>
 
+
 struct aa_load_ent {
 	struct list_head list;
 	struct aa_profile *new;
@@ -35,6 +36,7 @@ struct aa_load_ent *aa_load_ent_alloc(void);
 #define PACKED_MODE_COMPLAIN	1
 #define PACKED_MODE_KILL	2
 #define PACKED_MODE_UNCONFINED	3
+#define PACKED_MODE_USER	4
 
 struct aa_ns;
 
@@ -161,25 +163,6 @@ aa_get_profile_loaddata(struct aa_loaddata *data)
 	return data;
 }
 
-/**
- * aa_get_profile_loaddata_not0 - get a profile reference count if not zero
- * @data: reference to get a count on
- *
- * Like aa_get_profile_loaddata(), but safe to call on an entry that may
- * be on a list (e.g. ns->rawdata_list) where the last pcount has already
- * dropped and the deferred cleanup has not yet run.
- *
- * Returns: pointer to reference, or %NULL if @data is NULL or its
- *          profile refcount has already reached zero.
- */
-static inline struct aa_loaddata *
-aa_get_profile_loaddata_not0(struct aa_loaddata *data)
-{
-	if (data && kref_get_unless_zero(&data->pcount))
-		return data;
-	return NULL;
-}
-
 void __aa_loaddata_update(struct aa_loaddata *data, long revision);
 bool aa_rawdata_eq(struct aa_loaddata *l, struct aa_loaddata *r);
 void aa_loaddata_kref(struct kref *kref);
@@ -204,7 +187,7 @@ bool aa_unpack_X(struct aa_ext *e, enum aa_code code);
 bool aa_unpack_nameX(struct aa_ext *e, enum aa_code code, const char *name);
 bool aa_unpack_u32(struct aa_ext *e, u32 *data, const char *name);
 bool aa_unpack_u64(struct aa_ext *e, u64 *data, const char *name);
-size_t aa_unpack_array(struct aa_ext *e, const char *name);
+bool aa_unpack_array(struct aa_ext *e, const char *name, u16 *size);
 size_t aa_unpack_blob(struct aa_ext *e, char **blob, const char *name);
 int aa_unpack_str(struct aa_ext *e, const char **string, const char *name);
 int aa_unpack_strdup(struct aa_ext *e, char **string, const char *name);

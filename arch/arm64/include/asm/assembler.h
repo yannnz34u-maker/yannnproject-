@@ -34,11 +34,6 @@
 	wx\n	.req	w\n
 	.endr
 
-	.macro save_and_disable_daif, flags
-	mrs	\flags, daif
-	msr	daifset, #0xf
-	.endm
-
 	.macro disable_daif
 	msr	daifset, #0xf
 	.endm
@@ -47,18 +42,14 @@
 	msr	daifclr, #0xf
 	.endm
 
-	.macro	restore_daif, flags:req
-	msr	daif, \flags
-	.endm
-
-	/* IRQ/FIQ are the lowest priority flags, unconditionally unmask the rest. */
-	.macro enable_da
-	msr	daifclr, #(8 | 4)
-	.endm
-
 /*
  * Save/restore interrupts.
  */
+	.macro save_and_disable_daif, flags
+	mrs	\flags, daif
+	msr	daifset, #0xf
+	.endm
+
 	.macro	save_and_disable_irq, flags
 	mrs	\flags, daif
 	msr	daifset, #3
@@ -404,14 +395,13 @@ alternative_endif
  * [start, end) with dcache line size explicitly provided.
  *
  * 	op:		operation passed to dc instruction
- * 	domain:		domain used in dsb instruciton
  * 	start:          starting virtual address of the region
  * 	end:            end virtual address of the region
  *	linesz:		dcache line size
  * 	fixup:		optional label to branch to on user fault
  * 	Corrupts:       start, end, tmp
  */
-	.macro dcache_by_myline_op op, domain, start, end, linesz, tmp, fixup
+	.macro dcache_by_myline_op_nosync op, start, end, linesz, tmp, fixup
 	sub	\tmp, \linesz, #1
 	bic	\start, \start, \tmp
 .Ldcache_op\@:
@@ -435,25 +425,39 @@ alternative_endif
 	add	\start, \start, \linesz
 	cmp	\start, \end
 	b.lo	.Ldcache_op\@
-	dsb	\domain
 
 	_cond_uaccess_extable .Ldcache_op\@, \fixup
 	.endm
 
 /*
  * Macro to perform a data cache maintenance for the interval
- * [start, end)
+ * [start, end) without waiting for completion
  *
  * 	op:		operation passed to dc instruction
- * 	domain:		domain used in dsb instruciton
+ * 	start:          starting virtual address of the region
+ * 	end:            end virtual address of the region
+ * 	fixup:		optional label to branch to on user fault
+ * 	Corrupts:       start, end, tmp1, tmp2
+ */
+	.macro dcache_by_line_op_nosync op, start, end, tmp1, tmp2, fixup
+	dcache_line_size \tmp1, \tmp2
+	dcache_by_myline_op_nosync \op, \start, \end, \tmp1, \tmp2, \fixup
+	.endm
+
+/*
+ * Macro to perform a data cache maintenance for the interval
+ * [start, end) and wait for completion
+ *
+ * 	op:		operation passed to dc instruction
+ * 	domain:		domain used in dsb instruction
  * 	start:          starting virtual address of the region
  * 	end:            end virtual address of the region
  * 	fixup:		optional label to branch to on user fault
  * 	Corrupts:       start, end, tmp1, tmp2
  */
 	.macro dcache_by_line_op op, domain, start, end, tmp1, tmp2, fixup
-	dcache_line_size \tmp1, \tmp2
-	dcache_by_myline_op \op, \domain, \start, \end, \tmp1, \tmp2, \fixup
+	dcache_by_line_op_nosync \op, \start, \end, \tmp1, \tmp2, \fixup
+	dsb \domain
 	.endm
 
 /*
@@ -620,17 +624,6 @@ alternative_endif
 	.endm
 
 /*
- * Perform the reverse of offset_ttbr1.
- * bic is used as it can cover the immediate value and, in future, won't need
- * to be nop'ed out when dealing with 52-bit kernel VAs.
- */
-	.macro	restore_ttbr1, ttbr
-#ifdef CONFIG_ARM64_VA_BITS_52
-	bic	\ttbr, \ttbr, #TTBR1_BADDR_4852_OFFSET
-#endif
-	.endm
-
-/*
  * Arrange a physical address in a TTBR register, taking care of 52-bit
  * addresses.
  *
@@ -660,12 +653,10 @@ alternative_endif
 	.endm
 
 	.macro	pte_to_phys, phys, pte
-#ifdef CONFIG_ARM64_PA_BITS_52
-	ubfiz	\phys, \pte, #(48 - 16 - 12), #16
-	bfxil	\phys, \pte, #16, #32
-	lsl	\phys, \phys, #16
-#else
 	and	\phys, \pte, #PTE_ADDR_MASK
+#ifdef CONFIG_ARM64_PA_BITS_52
+	orr	\phys, \phys, \phys, lsl #PTE_ADDR_HIGH_SHIFT
+	and	\phys, \phys, GENMASK_ULL(PHYS_MASK_SHIFT - 1, PAGE_SHIFT)
 #endif
 	.endm
 

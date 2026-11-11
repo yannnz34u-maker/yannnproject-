@@ -13,10 +13,11 @@ enum rcar_gen4_clk_types {
 	CLK_TYPE_GEN4_MAIN = CLK_TYPE_CUSTOM,
 	CLK_TYPE_GEN4_PLL1,
 	CLK_TYPE_GEN4_PLL2,
+	CLK_TYPE_GEN4_PLL2_VAR,
 	CLK_TYPE_GEN4_PLL2X_3X,	/* r8a779a0 only */
 	CLK_TYPE_GEN4_PLL3,
-	CLK_TYPE_GEN4_PLL5,
 	CLK_TYPE_GEN4_PLL4,
+	CLK_TYPE_GEN4_PLL5,
 	CLK_TYPE_GEN4_PLL6,
 	CLK_TYPE_GEN4_SDSRC,
 	CLK_TYPE_GEN4_SDH,
@@ -71,8 +72,7 @@ struct rcar_gen4_cpg_pll_config {
 
 struct clk *rcar_gen4_cpg_clk_register(struct device *dev,
 	const struct cpg_core_clk *core, const struct cpg_mssr_info *info,
-	struct clk **clks, void __iomem *base,
-	struct raw_notifier_head *notifiers);
+	struct cpg_mssr_pub *pub);
 int rcar_gen4_cpg_init(const struct rcar_gen4_cpg_pll_config *config,
 		       unsigned int clk_extalr, u32 mode);
 

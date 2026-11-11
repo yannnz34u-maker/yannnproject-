@@ -512,7 +512,7 @@ err_disable_pm:
 	return ret;
 }
 
-static int fsl_audmix_remove(struct platform_device *pdev)
+static void fsl_audmix_remove(struct platform_device *pdev)
 {
 	struct fsl_audmix *priv = dev_get_drvdata(&pdev->dev);
 
@@ -520,8 +520,6 @@ static int fsl_audmix_remove(struct platform_device *pdev)
 
 	if (priv->pdev)
 		platform_device_unregister(priv->pdev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -564,7 +562,7 @@ static const struct dev_pm_ops fsl_audmix_pm = {
 
 static struct platform_driver fsl_audmix_driver = {
 	.probe = fsl_audmix_probe,
-	.remove = fsl_audmix_remove,
+	.remove_new = fsl_audmix_remove,
 	.driver = {
 		.name = "fsl-audmix",
 		.of_match_table = fsl_audmix_ids,

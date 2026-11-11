@@ -14,24 +14,18 @@ kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
 	 inject_fault.o va_layout.o handle_exit.o \
 	 guest.o debug.o reset.o sys_regs.o stacktrace.o \
 	 vgic-sys-reg-v3.o fpsimd.o pkvm.o \
-	 arch_timer.o trng.o vmid.o iommu.o \
+	 arch_timer.o trng.o vmid.o emulate-nested.o nested.o \
 	 vgic/vgic.o vgic/vgic-init.o \
 	 vgic/vgic-irqfd.o vgic/vgic-v2.o \
 	 vgic/vgic-v3.o vgic/vgic-v4.o \
 	 vgic/vgic-mmio.o vgic/vgic-mmio-v2.o \
 	 vgic/vgic-mmio-v3.o vgic/vgic-kvm-device.o \
-	 vgic/vgic-its.o vgic/vgic-debug.o
+	 vgic/vgic-its.o vgic/vgic-debug.o iommu.o
 
 kvm-$(CONFIG_HW_PERF_EVENTS)  += pmu-emul.o pmu.o
-kvm-$(CONFIG_ANDROID_ARM64_WORKAROUND_DMA_BEYOND_POC) += android_erratum_pgtable.o
-
-# Work around a false positive Clang 22 -Wuninitialized-const-pointer warning
-CFLAGS_sys_regs.o := $(call cc-disable-warning, uninitialized-const-pointer)
+kvm-$(CONFIG_PTDUMP_STAGE2_DEBUGFS) += ptdump.o
 
 kvm-$(CONFIG_TRACING) += hyp_events.o hyp_trace.o
-
-# Work around a false positive Clang 22 -Wuninitialized-const-pointer warning
-CFLAGS_sys_regs.o := $(call cc-disable-warning, uninitialized-const-pointer)
 
 always-y := hyp_constants.h hyp-constants.s
 

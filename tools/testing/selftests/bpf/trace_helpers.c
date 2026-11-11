@@ -15,9 +15,10 @@
 #include <libelf.h>
 #include <gelf.h>
 
-#define DEBUGFS "/sys/kernel/debug/tracing/"
+#define TRACEFS_PIPE	"/sys/kernel/tracing/trace_pipe"
+#define DEBUGFS_PIPE	"/sys/kernel/debug/tracing/trace_pipe"
 
-#define MAX_SYMS 300000
+#define MAX_SYMS 400000
 static struct ksym syms[MAX_SYMS];
 static int sym_cnt;
 
@@ -26,7 +27,7 @@ static int ksym_cmp(const void *p1, const void *p2)
 	return ((struct ksym *)p1)->addr - ((struct ksym *)p2)->addr;
 }
 
-int load_kallsyms(void)
+int load_kallsyms_refresh(void)
 {
 	FILE *f;
 	char func[256], buf[256];
@@ -34,12 +35,7 @@ int load_kallsyms(void)
 	void *addr;
 	int i = 0;
 
-	/*
-	 * This is called/used from multiplace places,
-	 * load symbols just once.
-	 */
-	if (sym_cnt)
-		return 0;
+	sym_cnt = 0;
 
 	f = fopen("/proc/kallsyms", "r");
 	if (!f)
@@ -50,6 +46,9 @@ int load_kallsyms(void)
 			break;
 		if (!addr)
 			continue;
+		if (i >= MAX_SYMS)
+			return -EFBIG;
+
 		syms[i].addr = (long) addr;
 		syms[i].name = strdup(func);
 		i++;
@@ -58,6 +57,17 @@ int load_kallsyms(void)
 	sym_cnt = i;
 	qsort(syms, sym_cnt, sizeof(struct ksym), ksym_cmp);
 	return 0;
+}
+
+int load_kallsyms(void)
+{
+	/*
+	 * This is called/used from multiplace places,
+	 * load symbols just once.
+	 */
+	if (sym_cnt)
+		return 0;
+	return load_kallsyms_refresh();
 }
 
 struct ksym *ksym_search(long key)
@@ -133,7 +143,10 @@ void read_trace_pipe(void)
 {
 	int trace_fd;
 
-	trace_fd = open(DEBUGFS "trace_pipe", O_RDONLY, 0);
+	if (access(TRACEFS_PIPE, F_OK) == 0)
+		trace_fd = open(TRACEFS_PIPE, O_RDONLY, 0);
+	else
+		trace_fd = open(DEBUGFS_PIPE, O_RDONLY, 0);
 	if (trace_fd < 0)
 		return;
 

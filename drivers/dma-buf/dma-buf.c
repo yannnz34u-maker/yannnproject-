@@ -31,14 +31,14 @@
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
 
+#include <uapi/linux/dma-buf.h>
+#include <uapi/linux/magic.h>
+
 #ifndef __GENKSYMS__
 #include <linux/fdtable.h>
 #include <trace/events/kmem.h>
 #endif
 #include <trace/hooks/dmabuf.h>
-
-#include <uapi/linux/dma-buf.h>
-#include <uapi/linux/magic.h>
 
 #include "dma-buf-sysfs-stats.h"
 
@@ -120,7 +120,7 @@ struct dma_buf *dma_buf_iter_begin(void)
 	 */
 	mutex_lock(&dmabuf_list_mutex);
 	list_for_each_entry(dmabuf, &dmabuf_list, list_node) {
-		if (atomic_long_inc_not_zero(&dmabuf->file->f_count)) {
+		if (get_file_rcu(dmabuf->file)) {
 			ret = dmabuf;
 			break;
 		}
@@ -154,7 +154,7 @@ struct dma_buf *dma_buf_iter_next(struct dma_buf *dmabuf)
 	mutex_lock(&dmabuf_list_mutex);
 	dma_buf_put(dmabuf);
 	list_for_each_entry_continue(dmabuf, &dmabuf_list, list_node) {
-		if (atomic_long_inc_not_zero(&dmabuf->file->f_count)) {
+		if (get_file_rcu(dmabuf->file)) {
 			ret = dmabuf;
 			break;
 		}
@@ -199,6 +199,7 @@ static void dma_buf_release(struct dentry *dentry)
 	dma_buf_stats_teardown(dmabuf);
 	dmabuf->ops->release(dmabuf);
 
+	trace_android_vh_dma_buf_release(dmabuf);
 	if (dmabuf->resv == (struct dma_resv *)&dmabuf[1])
 		dma_resv_fini(dmabuf->resv);
 
@@ -670,7 +671,7 @@ int copy_dmabuf_info(u64 clone_flags, struct task_struct *task)
 
 	if (task->mm) {
 		get_dmabuf_info(child_dmabuf_info);
-		task->mm->abi_extend->dmabuf_info = child_dmabuf_info;
+		task->mm->dmabuf_info = child_dmabuf_info;
 	}
 	if (task->files) {
 		get_dmabuf_info(child_dmabuf_info);
@@ -698,7 +699,8 @@ void put_dmabuf_info(struct task_dma_buf_info *dmabuf_info)
 			 dmabuf_info->rss);
 
 	if (!list_empty(&dmabuf_info->dmabufs) || dmabuf_info->dmabuf_count > 0)
-		pr_alert("destroying task_dma_buf_info with non-empty dmabuf list %u\n",
+		pr_alert("destroying task with non-empty dmabuf list %zu %u\n",
+			 list_count_nodes(&dmabuf_info->dmabufs),
 			 dmabuf_info->dmabuf_count);
 
 	kfree(dmabuf_info);
@@ -815,7 +817,6 @@ err_retries:
 static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 {
 	struct dma_buf *dmabuf;
-	bool ignore_bounds = false;
 	int ret;
 
 	if (!is_dma_buf_file(file))
@@ -827,11 +828,9 @@ static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 	if (!dmabuf->ops->mmap)
 		return -EINVAL;
 
-	trace_android_vh_ignore_dmabuf_vmap_bounds(dmabuf, &ignore_bounds);
-
 	/* check for overflowing the buffer's size */
-	if ((vma->vm_pgoff + vma_pages(vma) >
-	    dmabuf->size >> PAGE_SHIFT) && !ignore_bounds)
+	if (vma->vm_pgoff + vma_pages(vma) >
+	    dmabuf->size >> PAGE_SHIFT)
 		return -EINVAL;
 
 	ret = dmabuf->ops->mmap(dmabuf, vma);
@@ -843,7 +842,7 @@ static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 		if (WARN_ON(!(vma->vm_flags & VM_SPECIAL)))
 			vm_flags_set(vma, VM_DONTEXPAND);
 
-		int err = dma_buf_account_task(dmabuf, vma->vm_mm->abi_extend->dmabuf_info);
+		int err = dma_buf_account_task(dmabuf, vma->vm_mm->dmabuf_info);
 
 		if (err)
 			pr_err("dmabuf accounting failed during mmap operation, err %d\n", err);
@@ -1007,14 +1006,12 @@ static __poll_t dma_buf_poll(struct file *file, poll_table *poll)
 	return events;
 }
 
-static long _dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
+static void _dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
 {
 	spin_lock(&dmabuf->name_lock);
 	kfree(dmabuf->name);
 	dmabuf->name = name;
 	spin_unlock(&dmabuf->name_lock);
-
-	return 0;
 }
 
 /**
@@ -1023,7 +1020,7 @@ static long _dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
  * piece of memory is used for multiple purpose between different devices.
  *
  * @dmabuf: [in]     dmabuf buffer that will be renamed.
- * @name:   [in]     A NUL-terminated string that contains the name of
+ * @buf:    [in]     A piece of userspace memory that contains the name of
  *                   the dma-buf.
  *
  * Returns 0 on success. If the dma-buf buffer is already attached to
@@ -1032,33 +1029,26 @@ static long _dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
  */
 long dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
 {
-	long ret = 0;
 	char *buf = kstrndup(name, DMA_BUF_NAME_LEN, GFP_KERNEL);
-
 	if (!buf)
 		return -ENOMEM;
 
-	ret = _dma_buf_set_name(dmabuf, buf);
-	if (ret)
-		kfree(buf);
+	_dma_buf_set_name(dmabuf, buf);
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(dma_buf_set_name);
 
 static long dma_buf_set_name_user(struct dma_buf *dmabuf, const char __user *buf)
 {
 	char *name = strndup_user(buf, DMA_BUF_NAME_LEN);
-	long ret = 0;
 
 	if (IS_ERR(name))
 		return PTR_ERR(name);
 
-	ret = _dma_buf_set_name(dmabuf, name);
-	if (ret)
-		kfree(name);
+	_dma_buf_set_name(dmabuf, name);
 
-	return ret;
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_SYNC_FILE)
@@ -1384,7 +1374,6 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 	init_waitqueue_head(&dmabuf->poll);
 	dmabuf->cb_in.poll = dmabuf->cb_out.poll = &dmabuf->poll;
 	dmabuf->cb_in.active = dmabuf->cb_out.active = 0;
-	mutex_init(&dmabuf->lock);
 	INIT_LIST_HEAD(&dmabuf->attachments);
 
 	if (!resv) {
@@ -1536,6 +1525,70 @@ static struct sg_table * __map_dma_buf(struct dma_buf_attachment *attach,
 }
 
 /**
+ * DOC: locking convention
+ *
+ * In order to avoid deadlock situations between dma-buf exports and importers,
+ * all dma-buf API users must follow the common dma-buf locking convention.
+ *
+ * Convention for importers
+ *
+ * 1. Importers must hold the dma-buf reservation lock when calling these
+ *    functions:
+ *
+ *     - dma_buf_pin()
+ *     - dma_buf_unpin()
+ *     - dma_buf_map_attachment()
+ *     - dma_buf_unmap_attachment()
+ *     - dma_buf_vmap()
+ *     - dma_buf_vunmap()
+ *
+ * 2. Importers must not hold the dma-buf reservation lock when calling these
+ *    functions:
+ *
+ *     - dma_buf_attach()
+ *     - dma_buf_dynamic_attach()
+ *     - dma_buf_detach()
+ *     - dma_buf_export()
+ *     - dma_buf_fd()
+ *     - dma_buf_get()
+ *     - dma_buf_put()
+ *     - dma_buf_mmap()
+ *     - dma_buf_begin_cpu_access()
+ *     - dma_buf_end_cpu_access()
+ *     - dma_buf_map_attachment_unlocked()
+ *     - dma_buf_unmap_attachment_unlocked()
+ *     - dma_buf_vmap_unlocked()
+ *     - dma_buf_vunmap_unlocked()
+ *
+ * Convention for exporters
+ *
+ * 1. These &dma_buf_ops callbacks are invoked with unlocked dma-buf
+ *    reservation and exporter can take the lock:
+ *
+ *     - &dma_buf_ops.attach()
+ *     - &dma_buf_ops.detach()
+ *     - &dma_buf_ops.release()
+ *     - &dma_buf_ops.begin_cpu_access()
+ *     - &dma_buf_ops.end_cpu_access()
+ *     - &dma_buf_ops.mmap()
+ *
+ * 2. These &dma_buf_ops callbacks are invoked with locked dma-buf
+ *    reservation and exporter can't take the lock:
+ *
+ *     - &dma_buf_ops.pin()
+ *     - &dma_buf_ops.unpin()
+ *     - &dma_buf_ops.map_dma_buf()
+ *     - &dma_buf_ops.unmap_dma_buf()
+ *     - &dma_buf_ops.vmap()
+ *     - &dma_buf_ops.vunmap()
+ *
+ * 3. Exporters must hold the dma-buf reservation lock when calling these
+ *    functions:
+ *
+ *     - dma_buf_move_notify()
+ */
+
+/**
  * dma_buf_dynamic_attach - Add the device to dma_buf's attachments list
  * @dmabuf:		[in]	buffer to attach device to.
  * @dev:		[in]	device to be attached.
@@ -1599,8 +1652,8 @@ dma_buf_dynamic_attach(struct dma_buf *dmabuf, struct device *dev,
 	    dma_buf_is_dynamic(dmabuf)) {
 		struct sg_table *sgt;
 
+		dma_resv_lock(attach->dmabuf->resv, NULL);
 		if (dma_buf_is_dynamic(attach->dmabuf)) {
-			dma_resv_lock(attach->dmabuf->resv, NULL);
 			ret = dmabuf->ops->pin(attach);
 			if (ret)
 				goto err_unlock;
@@ -1613,8 +1666,7 @@ dma_buf_dynamic_attach(struct dma_buf *dmabuf, struct device *dev,
 			ret = PTR_ERR(sgt);
 			goto err_unpin;
 		}
-		if (dma_buf_is_dynamic(attach->dmabuf))
-			dma_resv_unlock(attach->dmabuf->resv);
+		dma_resv_unlock(attach->dmabuf->resv);
 		attach->sgt = sgt;
 		attach->dir = DMA_BIDIRECTIONAL;
 	}
@@ -1630,8 +1682,7 @@ err_unpin:
 		dmabuf->ops->unpin(attach);
 
 err_unlock:
-	if (dma_buf_is_dynamic(attach->dmabuf))
-		dma_resv_unlock(attach->dmabuf->resv);
+	dma_resv_unlock(attach->dmabuf->resv);
 
 	dma_buf_detach(dmabuf, attach);
 	return ERR_PTR(ret);
@@ -1674,24 +1725,22 @@ static void __unmap_dma_buf(struct dma_buf_attachment *attach,
  */
 void dma_buf_detach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
 {
-	if (WARN_ON(!dmabuf || !attach))
+	if (WARN_ON(!dmabuf || !attach || dmabuf != attach->dmabuf))
 		return;
 
+	dma_resv_lock(dmabuf->resv, NULL);
+
 	if (attach->sgt) {
-		if (dma_buf_is_dynamic(attach->dmabuf))
-			dma_resv_lock(attach->dmabuf->resv, NULL);
 
 		__unmap_dma_buf(attach, attach->sgt, attach->dir);
 
-		if (dma_buf_is_dynamic(attach->dmabuf)) {
+		if (dma_buf_is_dynamic(attach->dmabuf))
 			dmabuf->ops->unpin(attach);
-			dma_resv_unlock(attach->dmabuf->resv);
-		}
 	}
-
-	dma_resv_lock(dmabuf->resv, NULL);
 	list_del(&attach->node);
+
 	dma_resv_unlock(dmabuf->resv);
+
 	if (dmabuf->ops->detach)
 		dmabuf->ops->detach(dmabuf, attach);
 
@@ -1782,8 +1831,7 @@ struct sg_table *dma_buf_map_attachment(struct dma_buf_attachment *attach,
 	if (WARN_ON(!attach || !attach->dmabuf))
 		return ERR_PTR(-EINVAL);
 
-	if (dma_buf_attachment_is_dynamic(attach))
-		dma_resv_assert_held(attach->dmabuf->resv);
+	dma_resv_assert_held(attach->dmabuf->resv);
 
 	if (attach->sgt) {
 		/*
@@ -1798,7 +1846,6 @@ struct sg_table *dma_buf_map_attachment(struct dma_buf_attachment *attach,
 	}
 
 	if (dma_buf_is_dynamic(attach->dmabuf)) {
-		dma_resv_assert_held(attach->dmabuf->resv);
 		if (!IS_ENABLED(CONFIG_DMABUF_MOVE_NOTIFY)) {
 			r = attach->dmabuf->ops->pin(attach);
 			if (r)
@@ -1887,14 +1934,10 @@ void dma_buf_unmap_attachment(struct dma_buf_attachment *attach,
 	if (WARN_ON(!attach || !attach->dmabuf || !sg_table))
 		return;
 
-	if (dma_buf_attachment_is_dynamic(attach))
-		dma_resv_assert_held(attach->dmabuf->resv);
+	dma_resv_assert_held(attach->dmabuf->resv);
 
 	if (attach->sgt == sg_table)
 		return;
-
-	if (dma_buf_is_dynamic(attach->dmabuf))
-		dma_resv_assert_held(attach->dmabuf->resv);
 
 	__unmap_dma_buf(attach, sg_table, direction);
 
@@ -1934,7 +1977,7 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_unmap_attachment_unlocked, DMA_BUF);
  *
  * @dmabuf:	[in]	buffer which is moving
  *
- * Informs all attachmenst that they need to destroy and recreated all their
+ * Informs all attachments that they need to destroy and recreate all their
  * mappings.
  */
 void dma_buf_move_notify(struct dma_buf *dmabuf)
@@ -1952,11 +1995,11 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_move_notify, DMA_BUF);
 /**
  * DOC: cpu access
  *
- * There are mutliple reasons for supporting CPU access to a dma buffer object:
+ * There are multiple reasons for supporting CPU access to a dma buffer object:
  *
  * - Fallback operations in the kernel, for example when a device is connected
  *   over USB and the kernel needs to shuffle the data around first before
- *   sending it away. Cache coherency is handled by braketing any transactions
+ *   sending it away. Cache coherency is handled by bracketing any transactions
  *   with calls to dma_buf_begin_cpu_access() and dma_buf_end_cpu_access()
  *   access.
  *
@@ -1983,7 +2026,7 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_move_notify, DMA_BUF);
  *   replace ION buffers mmap support was needed.
  *
  *   There is no special interfaces, userspace simply calls mmap on the dma-buf
- *   fd. But like for CPU access there's a need to braket the actual access,
+ *   fd. But like for CPU access there's a need to bracket the actual access,
  *   which is handled by the ioctl (DMA_BUF_IOCTL_SYNC). Note that
  *   DMA_BUF_IOCTL_SYNC can fail with -EAGAIN or -EINTR, in which case it must
  *   be restarted.
@@ -2057,10 +2100,10 @@ static int __dma_buf_begin_cpu_access(struct dma_buf *dmabuf,
  * preparations. Coherency is only guaranteed in the specified range for the
  * specified access direction.
  * @dmabuf:	[in]	buffer to prepare cpu access for.
- * @direction:	[in]	length of range for cpu access.
+ * @direction:	[in]	direction of access.
  *
  * After the cpu access is complete the caller should call
- * dma_buf_end_cpu_access(). Only when cpu access is braketed by both calls is
+ * dma_buf_end_cpu_access(). Only when cpu access is bracketed by both calls is
  * it guaranteed to be coherent with other DMA access.
  *
  * This function will also wait for any DMA transactions tracked through
@@ -2124,7 +2167,7 @@ EXPORT_SYMBOL_GPL(dma_buf_begin_cpu_access_partial);
  * actions. Coherency is only guaranteed in the specified range for the
  * specified access direction.
  * @dmabuf:	[in]	buffer to complete cpu access for.
- * @direction:	[in]	length of range for cpu access.
+ * @direction:	[in]	direction of access.
  *
  * This terminates CPU access started with dma_buf_begin_cpu_access().
  *
@@ -2210,7 +2253,7 @@ int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 		if (WARN_ON(!(vma->vm_flags & VM_SPECIAL)))
 			vm_flags_set(vma, VM_DONTEXPAND);
 
-		int err = dma_buf_account_task(dmabuf, vma->vm_mm->abi_extend->dmabuf_info);
+		int err = dma_buf_account_task(dmabuf, vma->vm_mm->dmabuf_info);
 
 		if (err)
 			pr_err("dmabuf accounting failed during mmap operation, err %d\n", err);
@@ -2239,40 +2282,66 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_mmap, DMA_BUF);
 int dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
 {
 	struct iosys_map ptr;
-	int ret = 0;
+	int ret;
 
 	iosys_map_clear(map);
 
 	if (WARN_ON(!dmabuf))
 		return -EINVAL;
 
+	dma_resv_assert_held(dmabuf->resv);
+
 	if (!dmabuf->ops->vmap)
 		return -EINVAL;
 
-	mutex_lock(&dmabuf->lock);
 	if (dmabuf->vmapping_counter) {
 		dmabuf->vmapping_counter++;
 		BUG_ON(iosys_map_is_null(&dmabuf->vmap_ptr));
 		*map = dmabuf->vmap_ptr;
-		goto out_unlock;
+		return 0;
 	}
 
 	BUG_ON(iosys_map_is_set(&dmabuf->vmap_ptr));
 
 	ret = dmabuf->ops->vmap(dmabuf, &ptr);
 	if (WARN_ON_ONCE(ret))
-		goto out_unlock;
+		return ret;
 
 	dmabuf->vmap_ptr = ptr;
 	dmabuf->vmapping_counter = 1;
 
 	*map = dmabuf->vmap_ptr;
 
-out_unlock:
-	mutex_unlock(&dmabuf->lock);
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(dma_buf_vmap, DMA_BUF);
+
+/**
+ * dma_buf_vmap_unlocked - Create virtual mapping for the buffer object into kernel
+ * address space. Same restrictions as for vmap and friends apply.
+ * @dmabuf:	[in]	buffer to vmap
+ * @map:	[out]	returns the vmap pointer
+ *
+ * Unlocked version of dma_buf_vmap()
+ *
+ * Returns 0 on success, or a negative errno code otherwise.
+ */
+int dma_buf_vmap_unlocked(struct dma_buf *dmabuf, struct iosys_map *map)
+{
+	int ret;
+
+	iosys_map_clear(map);
+
+	if (WARN_ON(!dmabuf))
+		return -EINVAL;
+
+	dma_resv_lock(dmabuf->resv, NULL);
+	ret = dma_buf_vmap(dmabuf, map);
+	dma_resv_unlock(dmabuf->resv);
+
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(dma_buf_vmap_unlocked, DMA_BUF);
 
 /**
  * dma_buf_vunmap - Unmap a vmap obtained by dma_buf_vmap.
@@ -2284,19 +2353,35 @@ void dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
 	if (WARN_ON(!dmabuf))
 		return;
 
+	dma_resv_assert_held(dmabuf->resv);
+
 	BUG_ON(iosys_map_is_null(&dmabuf->vmap_ptr));
 	BUG_ON(dmabuf->vmapping_counter == 0);
 	BUG_ON(!iosys_map_is_equal(&dmabuf->vmap_ptr, map));
 
-	mutex_lock(&dmabuf->lock);
 	if (--dmabuf->vmapping_counter == 0) {
 		if (dmabuf->ops->vunmap)
 			dmabuf->ops->vunmap(dmabuf, map);
 		iosys_map_clear(&dmabuf->vmap_ptr);
 	}
-	mutex_unlock(&dmabuf->lock);
 }
 EXPORT_SYMBOL_NS_GPL(dma_buf_vunmap, DMA_BUF);
+
+/**
+ * dma_buf_vunmap_unlocked - Unmap a vmap obtained by dma_buf_vmap.
+ * @dmabuf:	[in]	buffer to vunmap
+ * @map:	[in]	vmap pointer to vunmap
+ */
+void dma_buf_vunmap_unlocked(struct dma_buf *dmabuf, struct iosys_map *map)
+{
+	if (WARN_ON(!dmabuf))
+		return;
+
+	dma_resv_lock(dmabuf->resv, NULL);
+	dma_buf_vunmap(dmabuf, map);
+	dma_resv_unlock(dmabuf->resv);
+}
+EXPORT_SYMBOL_NS_GPL(dma_buf_vunmap_unlocked, DMA_BUF);
 
 int dma_buf_get_flags(struct dma_buf *dmabuf, unsigned long *flags)
 {

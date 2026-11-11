@@ -21,6 +21,13 @@
 #define  OCTEP_PCI_DEVICE_ID_CN93_PF 0xB200
 #define  OCTEP_PCI_DEVICE_ID_CN93_VF 0xB203
 
+#define  OCTEP_PCI_DEVICE_ID_CNF95N_PF 0xB400    //95N PF
+
+#define  OCTEP_PCI_DEVICE_ID_CN10KA_PF  0xB900   //CN10KA PF
+#define  OCTEP_PCI_DEVICE_ID_CNF10KA_PF 0xBA00   //CNF10KA PF
+#define  OCTEP_PCI_DEVICE_ID_CNF10KB_PF 0xBC00   //CNF10KB PF
+#define  OCTEP_PCI_DEVICE_ID_CN10KB_PF  0xBD00   //CN10KB PF
+
 #define  OCTEP_MAX_QUEUES   63
 #define  OCTEP_MAX_IQ       OCTEP_MAX_QUEUES
 #define  OCTEP_MAX_OQ       OCTEP_MAX_QUEUES
@@ -60,10 +67,19 @@ struct octep_pci_win_regs {
 
 struct octep_hw_ops {
 	void (*setup_iq_regs)(struct octep_device *oct, int q);
-	void (*setup_oq_regs)(struct octep_device *oct, int q);
+	int (*setup_oq_regs)(struct octep_device *oct, int q);
 	void (*setup_mbox_regs)(struct octep_device *oct, int mbox);
 
-	irqreturn_t (*non_ioq_intr_handler)(void *ioq_vector);
+	irqreturn_t (*oei_intr_handler)(void *ioq_vector);
+	irqreturn_t (*ire_intr_handler)(void *ioq_vector);
+	irqreturn_t (*ore_intr_handler)(void *ioq_vector);
+	irqreturn_t (*vfire_intr_handler)(void *ioq_vector);
+	irqreturn_t (*vfore_intr_handler)(void *ioq_vector);
+	irqreturn_t (*dma_intr_handler)(void *ioq_vector);
+	irqreturn_t (*dma_vf_intr_handler)(void *ioq_vector);
+	irqreturn_t (*pp_vf_intr_handler)(void *ioq_vector);
+	irqreturn_t (*misc_intr_handler)(void *ioq_vector);
+	irqreturn_t (*rsvd_intr_handler)(void *ioq_vector);
 	irqreturn_t (*ioq_intr_handler)(void *ioq_vector);
 	int (*soft_reset)(struct octep_device *oct);
 	void (*reinit_regs)(struct octep_device *oct);
@@ -71,6 +87,7 @@ struct octep_hw_ops {
 
 	void (*enable_interrupts)(struct octep_device *oct);
 	void (*disable_interrupts)(struct octep_device *oct);
+	void (*poll_non_ioq_interrupts)(struct octep_device *oct);
 
 	void (*enable_io_queues)(struct octep_device *oct);
 	void (*disable_io_queues)(struct octep_device *oct);
@@ -268,7 +285,22 @@ struct octep_device {
 
 	/* Work entry to handle ctrl mbox interrupt */
 	struct work_struct ctrl_mbox_task;
+	/* Wait queue for host to firmware requests */
+	wait_queue_head_t ctrl_req_wait_q;
+	/* List of objects waiting for h2f response */
+	struct list_head ctrl_req_wait_list;
 
+	/* Enable non-ioq interrupt polling */
+	bool poll_non_ioq_intr;
+	/* Work entry to poll non-ioq interrupts */
+	struct delayed_work intr_poll_task;
+
+	/* Firmware heartbeat timer */
+	struct timer_list hb_timer;
+	/* Firmware heartbeat miss count tracked by timer */
+	atomic_t hb_miss_cnt;
+	/* Task to reset device on heartbeat miss */
+	struct delayed_work hb_task;
 };
 
 static inline u16 OCTEP_MAJOR_REV(struct octep_device *oct)
@@ -350,6 +382,7 @@ int octep_setup_oqs(struct octep_device *oct);
 void octep_free_oqs(struct octep_device *oct);
 void octep_oq_dbell_init(struct octep_device *oct);
 void octep_device_setup_cn93_pf(struct octep_device *oct);
+void octep_device_setup_cnxk_pf(struct octep_device *oct);
 int octep_iq_process_completions(struct octep_iq *iq, u16 budget);
 int octep_oq_process_rx(struct octep_oq *oq, int budget);
 void octep_set_ethtool_ops(struct net_device *netdev);

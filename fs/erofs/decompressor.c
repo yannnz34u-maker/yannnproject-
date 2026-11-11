@@ -6,6 +6,7 @@
 #include "compress.h"
 #include <linux/module.h>
 #include <linux/lz4.h>
+#include <trace/hooks/lz4_decompress.h>
 
 #ifndef LZ4_DISTANCE_MAX	/* history window size */
 #define LZ4_DISTANCE_MAX 65535	/* set to maximum value by default */
@@ -214,6 +215,7 @@ static int z_erofs_lz4_decompress_mem(struct z_erofs_lz4_decompress_ctx *ctx,
 	unsigned int inputmargin;
 	u8 *out, *headpage, *src;
 	int ret, maptype;
+	bool lz4_decompression_bypass = false;
 
 	DBG_BUGON(*rq->in == NULL);
 	headpage = kmap_local_page(*rq->in);
@@ -239,6 +241,13 @@ static int z_erofs_lz4_decompress_mem(struct z_erofs_lz4_decompress_ctx *ctx,
 		return PTR_ERR(src);
 
 	out = dst + rq->pageofs_out;
+
+	trace_android_vh_lz4_decompress_bypass(src + inputmargin, out, rq->inputsize,
+			rq->outputsize, rq->inplace_io, &ret, &lz4_decompression_bypass);
+
+	if (lz4_decompression_bypass)
+		goto bypass_decompression;
+
 	/* legacy format could compress extra data in a pcluster. */
 	if (rq->partial_decoding || !support_0padding)
 		ret = LZ4_decompress_safe_partial(src + inputmargin, out,
@@ -247,6 +256,7 @@ static int z_erofs_lz4_decompress_mem(struct z_erofs_lz4_decompress_ctx *ctx,
 		ret = LZ4_decompress_safe(src + inputmargin, out,
 					  rq->inputsize, rq->outputsize);
 
+bypass_decompression:
 	if (ret != rq->outputsize) {
 		erofs_err(rq->sb, "failed to decompress %d in[%u, %u] out[%u]",
 			  ret, rq->inputsize, inputmargin, rq->outputsize);
@@ -345,7 +355,7 @@ static int z_erofs_transform_plain(struct z_erofs_decompress_req *rq,
 
 	for (; rq->outputsize; rq->pageofs_in = 0, cur += PAGE_SIZE, ni++) {
 		insz = min_t(unsigned int, PAGE_SIZE - rq->pageofs_in,
-			     rq->outputsize);
+                             rq->outputsize);
 		rq->outputsize -= insz;
 		if (!rq->in[ni])
 			continue;
@@ -356,12 +366,14 @@ static int z_erofs_transform_plain(struct z_erofs_decompress_req *rq,
 			po = (rq->pageofs_out + cur + pi) & ~PAGE_MASK;
 			DBG_BUGON(no >= nrpages_out);
 			cnt = min_t(unsigned int, insz - pi, PAGE_SIZE - po);
-			if (rq->out[no] == rq->in[ni])
+			if (rq->out[no] == rq->in[ni]) {
 				memmove(kin + po,
 					kin + rq->pageofs_in + pi, cnt);
-			else if (rq->out[no])
+				flush_dcache_page(rq->out[no]);
+			} else if (rq->out[no]) {
 				memcpy_to_page(rq->out[no], po,
 					       kin + rq->pageofs_in + pi, cnt);
+			}
 			pi += cnt;
 		} while (pi < insz);
 		kunmap_local(kin);
@@ -391,6 +403,13 @@ const struct z_erofs_decompressor erofs_decompressors[] = {
 		.name = "lzma"
 	},
 #endif
+#ifdef CONFIG_EROFS_FS_ZIP_DEFLATE
+	[Z_EROFS_COMPRESSION_DEFLATE] = {
+		.config = z_erofs_load_deflate_config,
+		.decompress = z_erofs_deflate_decompress,
+		.name = "deflate"
+	},
+#endif
 };
 
 int z_erofs_parse_cfgs(struct super_block *sb, struct erofs_super_block *dsb)
@@ -413,6 +432,7 @@ int z_erofs_parse_cfgs(struct super_block *sb, struct erofs_super_block *dsb)
 		return -EOPNOTSUPP;
 	}
 
+	erofs_init_metabuf(&buf, sb);
 	offset = EROFS_SUPER_OFFSET + sbi->sb_size;
 	alg = 0;
 	for (algs = sbi->available_compr_algs; algs; algs >>= 1, ++alg) {

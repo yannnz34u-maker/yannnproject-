@@ -309,9 +309,6 @@ static void event_property_update(struct work_struct *work)
 		if (!aconnector)
 			continue;
 
-		if (!aconnector->base.index)
-			continue;
-
 		connector = &aconnector->base;
 
 		/* check if display connected */
@@ -379,11 +376,7 @@ static void event_property_validate(struct work_struct *work)
 	     conn_index++) {
 		aconnector = hdcp_work->aconnector[conn_index];
 
-
 		if (!aconnector)
-			continue;
-
-		if (!aconnector->base.index)
 			continue;
 
 		/* check if display connected */
@@ -546,9 +539,10 @@ static void update_config(void *handle, struct cp_psp_stream_config *config)
 	link->dp.rev = aconnector->dc_link->dpcd_caps.dpcd_rev.raw;
 	link->dp.assr_enabled = config->assr_enabled;
 	link->dp.mst_enabled = config->mst_enabled;
+	link->dp.dp2_enabled = config->dp2_enabled;
 	link->dp.usb4_enabled = config->usb4_enabled;
 	display->adjust.disable = MOD_HDCP_DISPLAY_DISABLE_AUTHENTICATION;
-	link->adjust.auth_delay = 3;
+	link->adjust.auth_delay = 2;
 	link->adjust.hdcp1.disable = 0;
 	hdcp_w->encryption_status[display->index] = MOD_HDCP_ENCRYPTION_STATUS_HDCP_OFF;
 

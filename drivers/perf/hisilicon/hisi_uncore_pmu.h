@@ -43,9 +43,16 @@
 		return FIELD_GET(GENMASK_ULL(hi, lo), event->attr.config);  \
 	}
 
+#define HISI_EVENTID_MASK		GENMASK(7, 0)
+#define HISI_GET_EVENTID(ev)		((ev)->hw.config_base & HISI_EVENTID_MASK)
+
+#define HISI_PMU_EVTYPE_BITS		8
+#define HISI_PMU_EVTYPE_SHIFT(idx)	((idx) % 4 * HISI_PMU_EVTYPE_BITS)
+
 struct hisi_pmu;
 
 struct hisi_uncore_ops {
+	int (*check_filter)(struct perf_event *event);
 	void (*write_evtype)(struct hisi_pmu *, int, u32);
 	int (*get_event_idx)(struct perf_event *);
 	u64 (*read_counter)(struct hisi_pmu *, struct hw_perf_event *);
@@ -62,6 +69,13 @@ struct hisi_uncore_ops {
 	void (*disable_filter)(struct perf_event *event);
 };
 
+/* Describes the HISI PMU chip features information */
+struct hisi_pmu_dev_info {
+	const char *name;
+	const struct attribute_group **attr_groups;
+	void *private;
+};
+
 struct hisi_pmu_hwevents {
 	struct perf_event *hw_events[HISI_MAX_COUNTERS];
 	DECLARE_BITMAP(used_mask, HISI_MAX_COUNTERS);
@@ -72,6 +86,7 @@ struct hisi_pmu_hwevents {
 struct hisi_pmu {
 	struct pmu pmu;
 	const struct hisi_uncore_ops *ops;
+	const struct hisi_pmu_dev_info *dev_info;
 	struct hisi_pmu_hwevents pmu_events;
 	/* associated_cpus: All CPUs associated with the PMU */
 	cpumask_t associated_cpus;
@@ -121,6 +136,5 @@ ssize_t hisi_uncore_pmu_identifier_attr_show(struct device *dev,
 int hisi_uncore_pmu_init_irq(struct hisi_pmu *hisi_pmu,
 			     struct platform_device *pdev);
 
-void hisi_pmu_init(struct pmu *pmu, const char *name,
-		const struct attribute_group **attr_groups, struct module *module);
+void hisi_pmu_init(struct hisi_pmu *hisi_pmu, struct module *module);
 #endif /* __HISI_UNCORE_PMU_H__ */

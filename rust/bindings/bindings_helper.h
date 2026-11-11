@@ -6,7 +6,12 @@
  * Sorted alphabetically.
  */
 
+#include <kunit/test.h>
+#include <linux/errname.h>
 #include <linux/slab.h>
+#include <linux/refcount.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
 #include <linux/mm.h>
 
 /* `bindgen` gets confused at certain things. */

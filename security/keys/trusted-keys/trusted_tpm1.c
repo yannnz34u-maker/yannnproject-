@@ -7,7 +7,7 @@
  */
 
 #include <crypto/hash_info.h>
-#include <crypto/algapi.h>
+#include <crypto/utils.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/parser.h>

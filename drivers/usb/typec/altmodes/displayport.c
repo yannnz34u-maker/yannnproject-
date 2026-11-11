@@ -61,6 +61,13 @@ struct dp_altmode {
 	enum dp_state state;
 	bool hpd;
 	bool pending_hpd;
+	u32 irq_hpd_count;
+	/*
+	 * hpd is mandatory for irq_hpd assertion, so irq_hpd also needs its own pending flag if
+	 * both hpd and irq_hpd are asserted in the first Status Update before the pin assignment
+	 * is configured.
+	 */
+	bool pending_irq_hpd;
 
 	struct mutex lock; /* device lock */
 	struct work_struct work;
@@ -135,6 +142,7 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
 {
 	bool configured = !!DP_CONF_GET_PIN_ASSIGN(dp->data.conf);
 	bool hpd = !!(dp->data.status & DP_STATUS_HPD_STATE);
+	bool irq_hpd = !!(dp->data.status & DP_STATUS_IRQ_HPD);
 	u8 con = DP_STATUS_CONNECTION(dp->data.status);
 	int ret = 0;
 
@@ -151,12 +159,18 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
 				dp->hpd = hpd;
 				dp->pending_hpd = true;
 			}
+			if (dp->hpd && dp->pending_hpd && irq_hpd)
+				dp->pending_irq_hpd = true;
 		}
 	} else {
 		if (dp->hpd != hpd) {
 			drm_connector_oob_hotplug_event(dp->connector_fwnode);
 			dp->hpd = hpd;
 			sysfs_notify(&dp->alt->dev.kobj, "displayport", "hpd");
+		}
+		if (hpd && irq_hpd) {
+			dp->irq_hpd_count++;
+			sysfs_notify(&dp->alt->dev.kobj, "displayport", "irq_hpd");
 		}
 	}
 
@@ -176,6 +190,11 @@ static int dp_altmode_configured(struct dp_altmode *dp)
 		drm_connector_oob_hotplug_event(dp->connector_fwnode);
 		sysfs_notify(&dp->alt->dev.kobj, "displayport", "hpd");
 		dp->pending_hpd = false;
+		if (dp->pending_irq_hpd) {
+			dp->irq_hpd_count++;
+			sysfs_notify(&dp->alt->dev.kobj, "displayport", "irq_hpd");
+			dp->pending_irq_hpd = false;
+		}
 	}
 
 	return dp_altmode_notify(dp);
@@ -297,9 +316,11 @@ static int dp_altmode_vdm(struct typec_altmode *alt,
 	case CMDT_RSP_ACK:
 		switch (cmd) {
 		case CMD_ENTER_MODE:
+			typec_altmode_update_active(alt, true);
 			dp->state = DP_STATE_UPDATE;
 			break;
 		case CMD_EXIT_MODE:
+			typec_altmode_update_active(alt, false);
 			dp->data.status = 0;
 			dp->data.conf = 0;
 			if (dp->hpd) {
@@ -456,7 +477,7 @@ static const char * const pin_assignments[] = {
  */
 static u8 get_current_pin_assignments(struct dp_altmode *dp)
 {
-	if (DP_CONF_CURRENTLY(dp->data.conf) == DP_CONF_DFP_D)
+	if (DP_CONF_CURRENTLY(dp->data.conf) == DP_CONF_UFP_U_AS_DFP_D)
 		return DP_CAP_PIN_ASSIGN_DFP_D(dp->alt->vdo);
 	else
 		return DP_CAP_PIN_ASSIGN_UFP_D(dp->alt->vdo);
@@ -557,10 +578,19 @@ static ssize_t hpd_show(struct device *dev, struct device_attribute *attr, char 
 }
 static DEVICE_ATTR_RO(hpd);
 
+static ssize_t irq_hpd_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct dp_altmode *dp = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", dp->irq_hpd_count);
+}
+static DEVICE_ATTR_RO(irq_hpd);
+
 static struct attribute *displayport_attrs[] = {
 	&dev_attr_configuration.attr,
 	&dev_attr_pin_assignment.attr,
 	&dev_attr_hpd.attr,
+	&dev_attr_irq_hpd.attr,
 	NULL
 };
 
@@ -602,7 +632,10 @@ int dp_altmode_probe(struct typec_altmode *alt)
 	alt->ops = &dp_altmode_ops;
 
 	fwnode = dev_fwnode(alt->dev.parent->parent); /* typec_port fwnode */
-	dp->connector_fwnode = fwnode_find_reference(fwnode, "displayport", 0);
+	if (fwnode_property_present(fwnode, "displayport"))
+		dp->connector_fwnode = fwnode_find_reference(fwnode, "displayport", 0);
+	else
+		dp->connector_fwnode = fwnode_handle_get(fwnode); /* embedded DP */
 	if (IS_ERR(dp->connector_fwnode))
 		dp->connector_fwnode = NULL;
 

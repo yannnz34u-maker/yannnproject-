@@ -14,6 +14,7 @@
 #include <linux/average.h>
 #include <linux/bitops.h>
 #include <linux/compiler.h>
+#include <linux/completion.h>
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/kref.h>
@@ -128,12 +129,6 @@ struct batadv_hard_iface_bat_v {
 
 	/** @aggr_list: queue for to be aggregated OGM packets */
 	struct sk_buff_head aggr_list;
-
-	/**
-	 * @aggr_list_enabled: aggr_list is active and new skbs can be
-	 * enqueued. Protected by aggr_list.lock after initialization
-	 */
-	bool aggr_list_enabled:1;
 
 	/** @aggr_len: size of the OGM aggregate (excluding ethernet header) */
 	unsigned int aggr_len;
@@ -1402,14 +1397,20 @@ struct batadv_tp_vars {
 	/** @role: receiver/sender modi */
 	enum batadv_tp_meter_role role;
 
-	/** @sending: sending binary semaphore: 1 if sending, 0 is not */
-	atomic_t sending;
+	/**
+	 * @send_result: 0 when sending is ongoing and otherwise
+	 * enum batadv_tp_meter_reason
+	 */
+	atomic_t send_result;
 
-	/** @reason: reason for a stopped session */
-	enum batadv_tp_meter_reason reason;
+	/** @receiving: receiving binary semaphore: 1 if receiving, 0 is not */
+	atomic_t receiving;
 
 	/** @finish_work: work item for the finishing procedure */
 	struct delayed_work finish_work;
+
+	/** @finished: completion signaled when a sender thread exits */
+	struct completion finished;
 
 	/** @test_length: test length in milliseconds */
 	u32 test_length;
@@ -1486,9 +1487,6 @@ struct batadv_tp_vars {
 
 	/** @unacked_lock: protect unacked_list */
 	spinlock_t unacked_lock;
-
-	/** @unacked_count: number of unacked entries */
-	size_t unacked_count;
 
 	/** @last_recv_time: time (jiffies) a msg was received */
 	unsigned long last_recv_time;
@@ -1988,9 +1986,6 @@ struct batadv_tt_roam_node {
 	/** @addr: mac address of the client in the roaming phase */
 	u8 addr[ETH_ALEN];
 
-	/** @vid: VLAN identifier */
-	u16 vid;
-
 	/**
 	 * @counter: number of allowed roaming events per client within a single
 	 * OGM interval (changes are committed with each OGM)
@@ -2232,11 +2227,10 @@ struct batadv_algo_gw_ops {
 	void (*init_sel_class)(struct batadv_priv *bat_priv);
 
 	/**
-	 * @store_sel_class: parse and stores a new GW selection class
-	 *  (optional)
+	 * @sel_class_max: maximum allowed GW selection class
 	 */
-	ssize_t (*store_sel_class)(struct batadv_priv *bat_priv, char *buff,
-				   size_t count);
+	u32 sel_class_max;
+
 	/**
 	 * @get_best_gw_node: select the best GW from the list of available
 	 *  nodes (optional)
@@ -2376,6 +2370,12 @@ struct batadv_tvlv_handler {
 			       u8 *src, u8 *dst,
 			       void *tvlv_value, u16 tvlv_value_len);
 
+	/**
+	 * @mcast_handler: handler callback which is given the tvlv payload to
+	 *  process on incoming mcast packet
+	 */
+	int (*mcast_handler)(struct batadv_priv *bat_priv, struct sk_buff *skb);
+
 	/** @type: tvlv type this handler feels responsible for */
 	u8 type;
 
@@ -2401,6 +2401,13 @@ enum batadv_tvlv_handler_flags {
 	 *  will call this handler even if its type was not found (with no data)
 	 */
 	BATADV_TVLV_HANDLER_OGM_CIFNOTFND = BIT(1),
+
+	/**
+	 * @BATADV_TVLV_HANDLER_OGM_CALLED: interval tvlv handling flag - the
+	 *  API marks a handler as being called, so it won't be called if the
+	 *  BATADV_TVLV_HANDLER_OGM_CIFNOTFND flag was set
+	 */
+	BATADV_TVLV_HANDLER_OGM_CALLED = BIT(2),
 };
 
 #endif /* _NET_BATMAN_ADV_TYPES_H_ */

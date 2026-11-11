@@ -89,9 +89,9 @@ void nft_byteorder_eval(const struct nft_expr *expr,
 static const struct nla_policy nft_byteorder_policy[NFTA_BYTEORDER_MAX + 1] = {
 	[NFTA_BYTEORDER_SREG]	= { .type = NLA_U32 },
 	[NFTA_BYTEORDER_DREG]	= { .type = NLA_U32 },
-	[NFTA_BYTEORDER_OP]	= { .type = NLA_U32 },
-	[NFTA_BYTEORDER_LEN]	= { .type = NLA_U32 },
-	[NFTA_BYTEORDER_SIZE]	= { .type = NLA_U32 },
+	[NFTA_BYTEORDER_OP]	= NLA_POLICY_MAX(NLA_BE32, 255),
+	[NFTA_BYTEORDER_LEN]	= NLA_POLICY_MAX(NLA_BE32, 255),
+	[NFTA_BYTEORDER_SIZE]	= NLA_POLICY_MAX(NLA_BE32, 255),
 };
 
 static int nft_byteorder_init(const struct nft_ctx *ctx,
@@ -139,17 +139,25 @@ static int nft_byteorder_init(const struct nft_ctx *ctx,
 
 	priv->len = len;
 
-	err = nft_parse_register_load(tb[NFTA_BYTEORDER_SREG], &priv->sreg,
+	err = nft_parse_register_load(ctx, tb[NFTA_BYTEORDER_SREG], &priv->sreg,
 				      priv->len);
 	if (err < 0)
 		return err;
 
-	return nft_parse_register_store(ctx, tb[NFTA_BYTEORDER_DREG],
-					&priv->dreg, NULL, NFT_DATA_VALUE,
-					priv->len);
+	err = nft_parse_register_store(ctx, tb[NFTA_BYTEORDER_DREG],
+				       &priv->dreg, NULL, NFT_DATA_VALUE,
+				       priv->len);
+	if (err < 0)
+		return err;
+
+	if (nft_reg_overlap(priv->sreg, priv->dreg, priv->len))
+		return -EINVAL;
+
+	return 0;
 }
 
-static int nft_byteorder_dump(struct sk_buff *skb, const struct nft_expr *expr)
+static int nft_byteorder_dump(struct sk_buff *skb,
+			      const struct nft_expr *expr, bool reset)
 {
 	const struct nft_byteorder *priv = nft_expr_priv(expr);
 

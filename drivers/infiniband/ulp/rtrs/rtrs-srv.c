@@ -27,7 +27,9 @@ MODULE_LICENSE("GPL");
 #define MAX_HDR_SIZE PAGE_SIZE
 
 static struct rtrs_rdma_dev_pd dev_pd;
-struct class *rtrs_dev_class;
+const struct class rtrs_dev_class = {
+	.name = "rtrs-server",
+};
 static struct rtrs_srv_ib_ctx ib_ctx;
 
 static int __read_mostly max_chunk_size = DEFAULT_MAX_CHUNK_SIZE;
@@ -1707,12 +1709,6 @@ static int create_con(struct rtrs_srv_path *srv_path,
 				      srv->queue_depth * (1 + 2) + 1);
 
 		max_recv_wr = srv->queue_depth + 1;
-		/*
-		 * If we have all receive requests posted and
-		 * all write requests posted and each read request
-		 * requires an invalidate request + drain
-		 * and qp gets into error state.
-		 */
 	}
 	cq_num = max_send_wr + max_recv_wr;
 	atomic_set(&con->c.sq_wr_avail, max_send_wr);
@@ -1979,22 +1975,21 @@ static int rtrs_srv_rdma_cm_handler(struct rdma_cm_id *cm_id,
 {
 	struct rtrs_srv_path *srv_path = NULL;
 	struct rtrs_path *s = NULL;
+	struct rtrs_con *c = NULL;
 
-	if (ev->event != RDMA_CM_EVENT_CONNECT_REQUEST) {
-		struct rtrs_con *c = cm_id->context;
-
-		s = c->path;
-		srv_path = to_srv_path(s);
-	}
-
-	switch (ev->event) {
-	case RDMA_CM_EVENT_CONNECT_REQUEST:
+	if (ev->event == RDMA_CM_EVENT_CONNECT_REQUEST)
 		/*
 		 * In case of error cma.c will destroy cm_id,
 		 * see cma_process_remove()
 		 */
 		return rtrs_rdma_connect(cm_id, ev->param.conn.private_data,
 					  ev->param.conn.private_data_len);
+
+	c = cm_id->context;
+	s = c->path;
+	srv_path = to_srv_path(s);
+
+	switch (ev->event) {
 	case RDMA_CM_EVENT_ESTABLISHED:
 		/* Nothing here */
 		break;
@@ -2296,11 +2291,10 @@ static int __init rtrs_server_init(void)
 		       err);
 		return err;
 	}
-	rtrs_dev_class = class_create(THIS_MODULE, "rtrs-server");
-	if (IS_ERR(rtrs_dev_class)) {
-		err = PTR_ERR(rtrs_dev_class);
+	err = class_register(&rtrs_dev_class);
+	if (err)
 		goto out_err;
-	}
+
 	rtrs_wq = alloc_workqueue("rtrs_server_wq", 0, 0);
 	if (!rtrs_wq) {
 		err = -ENOMEM;
@@ -2310,7 +2304,7 @@ static int __init rtrs_server_init(void)
 	return 0;
 
 out_dev_class:
-	class_destroy(rtrs_dev_class);
+	class_unregister(&rtrs_dev_class);
 out_err:
 	return err;
 }
@@ -2318,7 +2312,7 @@ out_err:
 static void __exit rtrs_server_exit(void)
 {
 	destroy_workqueue(rtrs_wq);
-	class_destroy(rtrs_dev_class);
+	class_unregister(&rtrs_dev_class);
 	rtrs_rdma_dev_pd_deinit(&dev_pd);
 }
 

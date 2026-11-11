@@ -85,7 +85,7 @@ static void hsr_check_announce(struct net_device *hsr_dev)
 		}
 	} else {
 		/* Deactivate the announce timer  */
-		del_timer(&hsr->announce_timer);
+		timer_delete(&hsr->announce_timer);
 	}
 }
 
@@ -634,7 +634,6 @@ int hsr_dev_finalize(struct net_device *hsr_dev, struct net_device *slave[2],
 	hsr = netdev_priv(hsr_dev);
 	INIT_LIST_HEAD(&hsr->ports);
 	INIT_LIST_HEAD(&hsr->node_db);
-	INIT_LIST_HEAD(&hsr->self_node_db);
 	spin_lock_init(&hsr->list_lock);
 
 	eth_hw_addr_set(hsr_dev, slave[0]->dev_addr);

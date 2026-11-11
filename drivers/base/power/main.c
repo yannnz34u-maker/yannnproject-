@@ -36,6 +36,8 @@
 #include <linux/timer.h>
 #include <linux/wakeup_reason.h>
 
+#include <trace/hooks/dtask.h>
+
 #include "../base.h"
 #include "power.h"
 
@@ -239,8 +241,11 @@ static void dpm_wait(struct device *dev, bool async)
 	if (!dev)
 		return;
 
-	if (async || (pm_async_enabled && dev->power.async_suspend))
+	if (async || (pm_async_enabled && dev->power.async_suspend)) {
+		trace_android_vh_dpm_wait_start(dev);
 		wait_for_completion(&dev->power.completion);
+		trace_android_vh_dpm_wait_finish(dev);
+	}
 }
 
 static int dpm_wait_fn(struct device *dev, void *async_ptr)
@@ -1394,12 +1399,7 @@ static int __device_suspend_late(struct device *dev, pm_message_t state, bool as
 	TRACE_DEVICE(dev);
 	TRACE_SUSPEND(0);
 
-	/*
-	 * After this point, any runtime PM operations targeting the device
-	 * will fail until the corresponding pm_runtime_enable() call in
-	 * device_resume_early().
-	 */
-	pm_runtime_disable(dev);
+	__pm_runtime_disable(dev, false);
 
 	dpm_wait_for_subordinate(dev, async);
 

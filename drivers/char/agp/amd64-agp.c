@@ -546,7 +546,7 @@ static int agp_amd64_probe(struct pci_dev *pdev,
 	/* Fill in the mode register */
 	pci_read_config_dword(pdev, bridge->capndx+PCI_AGP_STATUS, &bridge->mode);
 
-	if (cache_nbs(pdev, cap_ptr) < 0) {
+	if (cache_nbs(pdev, cap_ptr) == -1) {
 		agp_put_bridge(bridge);
 		return -ENODEV;
 	}
@@ -588,9 +588,7 @@ static void agp_amd64_remove(struct pci_dev *pdev)
 	agp_bridges_found--;
 }
 
-#define agp_amd64_suspend NULL
-
-static int __maybe_unused agp_amd64_resume(struct device *dev)
+static int agp_amd64_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 
@@ -727,7 +725,7 @@ static const struct pci_device_id agp_amd64_pci_promisc_table[] = {
 	{ }
 };
 
-static SIMPLE_DEV_PM_OPS(agp_amd64_pm_ops, agp_amd64_suspend, agp_amd64_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(agp_amd64_pm_ops, NULL, agp_amd64_resume);
 
 static struct pci_driver agp_amd64_pci_driver = {
 	.name		= "agpgart-amd64",

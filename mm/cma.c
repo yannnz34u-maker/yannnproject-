@@ -36,13 +36,13 @@
 #include <linux/jiffies.h>
 #include <trace/events/cma.h>
 
+#include "internal.h"
 #include "cma.h"
 
 #undef CREATE_TRACE_POINTS
+#ifndef __GENKSYMS__
 #include <trace/hooks/mm.h>
-
-EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_start);
-EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_finish);
+#endif
 
 struct cma cma_areas[MAX_CMA_AREAS];
 unsigned cma_area_count;
@@ -169,6 +169,25 @@ void __init cma_reserve_pages_on_error(struct cma *cma)
 	cma->reserve_pages_on_error = true;
 }
 
+unsigned long cma_get_first_virtzone_base(int nid)
+{
+        struct pglist_data *pgdata;
+        struct zone *zone;
+        int zone_idx;
+
+        pgdata = NODE_DATA(nid);
+        if (!pgdata)
+                return 0;
+
+        for (zone_idx = ZONE_NOSPLIT; zone_idx <= ZONE_NOMERGE; zone_idx++) {
+                zone = &pgdata->node_zones[zone_idx];
+                if (zone->zone_start_pfn)
+                        return zone->zone_start_pfn << PAGE_SHIFT;
+        }
+
+        return 0;
+}
+
 /**
  * cma_init_reserved_mem() - create custom contiguous area from reserved memory
  * @base: Base address of the reserved area
@@ -273,6 +292,9 @@ int __init cma_declare_contiguous_nid(phys_addr_t base,
 	if (alignment && !is_power_of_2(alignment))
 		return -EINVAL;
 
+	if (!IS_ENABLED(CONFIG_NUMA))
+		nid = NUMA_NO_NODE;
+
 	/* Sanitise input arguments. */
 	alignment = max_t(phys_addr_t, alignment, CMA_MIN_ALIGNMENT_BYTES);
 	if (fixed && base & (alignment - 1)) {
@@ -329,18 +351,6 @@ int __init cma_declare_contiguous_nid(phys_addr_t base,
 		phys_addr_t addr = 0;
 
 		/*
-		 * All pages in the reserved area must come from the same zone.
-		 * If the requested region crosses the low/high memory boundary,
-		 * try allocating from high memory first and fall back to low
-		 * memory in case of failure.
-		 */
-		if (base < highmem_start && limit > highmem_start) {
-			addr = memblock_alloc_range_nid(size, alignment,
-					highmem_start, limit, nid, true);
-			limit = highmem_start;
-		}
-
-		/*
 		 * If there is enough memory, try a bottom-up allocation first.
 		 * It will place the new cma area close to the start of the node
 		 * and guarantee that the compaction is moving pages out of the
@@ -356,6 +366,18 @@ int __init cma_declare_contiguous_nid(phys_addr_t base,
 			memblock_set_bottom_up(false);
 		}
 #endif
+
+		/*
+		 * All pages in the reserved area must come from the same zone.
+		 * If the requested region crosses the low/high memory boundary,
+		 * try allocating from high memory first and fall back to low
+		 * memory in case of failure.
+		 */
+		if (!addr && base < highmem_start && limit > highmem_start) {
+			addr = memblock_alloc_range_nid(size, alignment,
+					highmem_start, limit, nid, true);
+			limit = highmem_start;
+		}
 
 		if (!addr) {
 			addr = memblock_alloc_range_nid(size, alignment, base,
@@ -378,24 +400,35 @@ int __init cma_declare_contiguous_nid(phys_addr_t base,
 	if (ret)
 		goto free_mem;
 
-	pr_info("Reserved %ld MiB at %pa\n", (unsigned long)size / SZ_1M,
-		&base);
+	pr_info("Reserved %ld MiB at %pa on node %d\n", (unsigned long)size / SZ_1M,
+		&base, nid);
 	return 0;
 
 free_mem:
 	memblock_phys_free(base, size);
 err:
-	pr_err("Failed to reserve %ld MiB\n", (unsigned long)size / SZ_1M);
+	pr_err("Failed to reserve %ld MiB on node %d\n", (unsigned long)size / SZ_1M,
+	       nid);
 	return ret;
 }
 
 #ifdef CONFIG_CMA_DEBUG
+#define CMA_DEBUG_SHOW_AREAS_DEFAULT true
+#else
+#define CMA_DEBUG_SHOW_AREAS_DEFAULT false
+#endif
+
 static void cma_debug_show_areas(struct cma *cma)
 {
 	unsigned long next_zero_bit, next_set_bit, nr_zero;
 	unsigned long start = 0;
 	unsigned long nr_part, nr_total = 0;
 	unsigned long nbits = cma_bitmap_maxno(cma);
+	bool show = CMA_DEBUG_SHOW_AREAS_DEFAULT;
+
+	trace_android_vh_cma_debug_show_areas(&show);
+	if (!show)
+		return;
 
 	spin_lock_irq(&cma->lock);
 	pr_info("number of available pages: ");
@@ -414,9 +447,6 @@ static void cma_debug_show_areas(struct cma *cma)
 	pr_cont("=> %lu free of %lu total pages\n", nr_total, cma->count);
 	spin_unlock_irq(&cma->lock);
 }
-#else
-static inline void cma_debug_show_areas(struct cma *cma) { }
-#endif
 
 /**
  * __cma_alloc() - allocate pages from contiguous area
@@ -441,16 +471,8 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	int ret = -ENOMEM;
 	int num_attempts = 0;
 	int max_retries = 5;
-	const char *name = cma ? cma->name : NULL;
 	bool bypass = false;
 	u64 stime = 0;
-
-	trace_android_vh_cma_alloc_bypass(cma, count, align, gfp_mask,
-				&page, &bypass);
-	if (bypass)
-		return page;
-
-	trace_cma_alloc_start(name, count, align);
 
 	if (WARN_ON_ONCE((gfp_mask & GFP_KERNEL) == 0 ||
 		(gfp_mask & ~(GFP_KERNEL|__GFP_NOWARN|__GFP_NORETRY)) != 0))
@@ -459,11 +481,18 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	if (!cma || !cma->count || !cma->bitmap)
 		goto out;
 
-	pr_debug("%s(cma %p, count %lu, align %d)\n", __func__, (void *)cma,
-		 count, align);
+	trace_android_vh_cma_alloc_bypass(cma, count, align, gfp_mask,
+				&page, &bypass);
+	if (bypass)
+		return page;
+
+	pr_debug("%s(cma %p, name: %s, count %lu, align %d)\n", __func__,
+		(void *)cma, cma->name, count, align);
 
 	if (!count)
 		goto out;
+
+	trace_android_vh_cma_alloc_set_max_retries(&max_retries);
 
 	mask = cma_bitmap_aligned_mask(cma, align);
 	offset = cma_bitmap_aligned_offset(cma, align);
@@ -473,6 +502,8 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	if (bitmap_count > bitmap_maxno)
 		goto out;
 
+	trace_cma_alloc_start(cma->name, count, align);
+	trace_android_vh_cma_alloc_retry(cma->name, &max_retries);
 	trace_android_vh_cma_alloc_lat_start(&stime);
 	for (;;) {
 		spin_lock_irq(&cma->lock);
@@ -525,14 +556,17 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 		if (ret != -EBUSY)
 			break;
 
-		pr_debug("%s(): memory range at %p is busy, retrying\n",
-			 __func__, pfn_to_page(pfn));
+		pr_debug("%s(): memory range at pfn 0x%lx %p is busy, retrying\n",
+			 __func__, pfn, pfn_to_page(pfn));
 
 		trace_cma_alloc_busy_retry(cma->name, pfn, pfn_to_page(pfn),
 					   count, align);
 		/* try again with a bit different memory target */
 		start = bitmap_no + mask + 1;
 	}
+
+	trace_cma_alloc_finish(cma->name, pfn, page, count, align, ret);
+	trace_android_vh_cma_alloc_end(cma, pfn, page, count, align, ret);
 
 	/*
 	 * CMA can allocate multiple page blocks, which results in different
@@ -552,8 +586,6 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 
 	pr_debug("%s(): returned %p\n", __func__, page);
 out:
-	trace_cma_alloc_finish(name, pfn, page, count, align);
-	trace_android_vh_cma_alloc_end(cma, pfn, page, count, align, ret);
 	trace_android_vh_cma_alloc_lat_end(stime, count);
 	if (page) {
 		count_vm_event(CMA_ALLOC_SUCCESS);
@@ -656,3 +688,7 @@ int cma_for_each_area(int (*it)(struct cma *cma, void *data), void *data)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(cma_for_each_area);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_start);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_busy_retry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_finish);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_release);

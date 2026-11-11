@@ -356,14 +356,7 @@ static int adm1266_state_read(struct seq_file *s, void *pdata)
 	struct i2c_client *client = to_i2c_client(dev);
 	int ret;
 
-	ret = pmbus_lock_interruptible(client);
-	if (ret)
-		return ret;
-
 	ret = i2c_smbus_read_word_data(client, ADM1266_READ_STATE);
-
-	pmbus_unlock(client);
-
 	if (ret < 0)
 		return ret;
 
@@ -381,8 +374,6 @@ static void adm1266_init_debugfs(struct adm1266_data *data)
 		return;
 
 	data->debugfs_dir = debugfs_create_dir(data->client->name, root);
-	if (!data->debugfs_dir)
-		return;
 
 	debugfs_create_devm_seqfile(&data->client->dev, "sequencer_state", data->debugfs_dir,
 				    adm1266_state_read);
@@ -554,7 +545,7 @@ static struct i2c_driver adm1266_driver = {
 		   .name = "adm1266",
 		   .of_match_table = adm1266_of_match,
 		  },
-	.probe_new = adm1266_probe,
+	.probe = adm1266_probe,
 	.id_table = adm1266_id,
 };
 

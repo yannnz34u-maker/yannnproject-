@@ -6,7 +6,7 @@
 #include <linux/device.h>
 #include <linux/kref.h>
 #include <linux/of.h>
-#include <linux/of_platform.h>
+#include <linux/of_device.h>
 #include <linux/pid.h>
 #include <linux/slab.h>
 
@@ -40,8 +40,6 @@ int host1x_memory_context_list_init(struct host1x *host1x)
 		return -ENOMEM;
 
 	for (i = 0; i < cdl->len; i++) {
-		struct iommu_fwspec *fwspec;
-
 		ctx = &cdl->devs[i];
 
 		ctx->host = host1x;
@@ -77,14 +75,20 @@ int host1x_memory_context_list_init(struct host1x *host1x)
 			goto unreg_devices;
 		}
 
-		fwspec = dev_iommu_fwspec_get(&ctx->dev);
-		if (!fwspec || !device_iommu_mapped(&ctx->dev)) {
+		if (!tegra_dev_iommu_get_stream_id(&ctx->dev, &ctx->stream_id) ||
+		    !device_iommu_mapped(&ctx->dev)) {
 			dev_err(host1x->dev, "Context device %d has no IOMMU!\n", i);
 			device_unregister(&ctx->dev);
+
+			/*
+			 * This means that if IOMMU is disabled but context devices
+			 * are defined in the device tree, Host1x will fail to probe.
+			 * That's probably OK in this time and age.
+			 */
+			err = -EINVAL;
+
 			goto unreg_devices;
 		}
-
-		ctx->stream_id = fwspec->ids[0] & 0xffff;
 	}
 
 	return 0;

@@ -26,9 +26,6 @@ struct v3d_queue_state {
 
 	u64 fence_context;
 	u64 emit_seqno;
-
-	/* Currently active job for this queue */
-	struct v3d_job *active_job;
 };
 
 /* Performance monitor object. The perform lifetime is controlled by userspace
@@ -112,6 +109,11 @@ struct v3d_dev {
 	spinlock_t mm_lock;
 
 	struct work_struct overflow_mem_work;
+
+	struct v3d_bin_job *bin_job;
+	struct v3d_render_job *render_job;
+	struct v3d_tfu_job *tfu_job;
+	struct v3d_csd_job *csd_job;
 
 	struct v3d_queue_state queue[V3D_MAX_QUEUES];
 
@@ -346,7 +348,7 @@ struct v3d_submit_ext {
 static inline unsigned long nsecs_to_jiffies_timeout(const u64 n)
 {
 	/* nsecs_to_jiffies64() does not guard against overflow */
-	if (NSEC_PER_SEC % HZ &&
+	if ((NSEC_PER_SEC % HZ) != 0 &&
 	    div_u64(n, NSEC_PER_SEC) >= MAX_JIFFY_OFFSET / HZ)
 		return MAX_JIFFY_OFFSET;
 

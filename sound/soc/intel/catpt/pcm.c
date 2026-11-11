@@ -686,6 +686,10 @@ static int catpt_dai_pcm_new(struct snd_soc_pcm_runtime *rtm,
 	return 0;
 }
 
+static const struct snd_soc_dai_ops catpt_dai_ops = {
+	.pcm_new = catpt_dai_pcm_new,
+};
+
 static struct snd_soc_dai_driver dai_drivers[] = {
 /* FE DAIs */
 {
@@ -766,7 +770,6 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 {
 	.name = "ssp0-port",
 	.id = CATPT_SSP_IFACE_0,
-	.pcm_new = catpt_dai_pcm_new,
 	.playback = {
 		.channels_min = 1,
 		.channels_max = 8,
@@ -775,11 +778,11 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 		.channels_min = 1,
 		.channels_max = 8,
 	},
+	.ops = &catpt_dai_ops,
 },
 {
 	.name = "ssp1-port",
 	.id = CATPT_SSP_IFACE_1,
-	.pcm_new = catpt_dai_pcm_new,
 	.playback = {
 		.channels_min = 1,
 		.channels_max = 8,
@@ -788,6 +791,7 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 		.channels_min = 1,
 		.channels_max = 8,
 	},
+	.ops = &catpt_dai_ops,
 },
 };
 

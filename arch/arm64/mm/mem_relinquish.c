@@ -12,6 +12,27 @@
 
 #include <asm/hypervisor.h>
 
+#ifndef ARM_SMCCC_KVM_FUNC_HYP_MEMINFO
+#define ARM_SMCCC_KVM_FUNC_HYP_MEMINFO		2
+
+#define ARM_SMCCC_VENDOR_HYP_KVM_HYP_MEMINFO_FUNC_ID			\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_64,				\
+			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
+			   ARM_SMCCC_KVM_FUNC_HYP_MEMINFO)
+#endif	/* ARM_SMCCC_KVM_FUNC_HYP_MEMINFO */
+
+#ifndef ARM_SMCCC_KVM_FUNC_MEM_RELINQUISH
+#define ARM_SMCCC_KVM_FUNC_MEM_RELINQUISH	9
+
+#define ARM_SMCCC_VENDOR_HYP_KVM_MEM_RELINQUISH_FUNC_ID			\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_64,				\
+			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
+			   ARM_SMCCC_KVM_FUNC_MEM_RELINQUISH)
+#endif	/* ARM_SMCCC_KVM_FUNC_MEM_RELINQUISH */
+
+static bool __page_relinquish_disallowed;
 static unsigned long memshare_granule_sz;
 
 static void kvm_page_relinquish(struct page *page)
@@ -48,8 +69,10 @@ void kvm_init_memrelinquish_services(void)
 
 	arm_smccc_1_1_invoke(ARM_SMCCC_VENDOR_HYP_KVM_HYP_MEMINFO_FUNC_ID,
 			     0, 0, 0, &res);
-	if (res.a0 > PAGE_SIZE) /* Includes error codes */
+	if (res.a0 > PAGE_SIZE) { /* Includes error codes */
+		__page_relinquish_disallowed = true;
 		return;
+	}
 
 	memshare_granule_sz = res.a0;
 
@@ -57,11 +80,11 @@ void kvm_init_memrelinquish_services(void)
 		hyp_ops.page_relinquish = kvm_page_relinquish;
 }
 
-bool kvm_has_memrelinquish_services(void)
+bool page_relinquish_disallowed(void)
 {
-	return !!memshare_granule_sz;
+	return __page_relinquish_disallowed;
 }
-EXPORT_SYMBOL_GPL(kvm_has_memrelinquish_services);
+EXPORT_SYMBOL_GPL(page_relinquish_disallowed);
 
 void page_relinquish(struct page *page)
 {

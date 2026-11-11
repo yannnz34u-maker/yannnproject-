@@ -18,8 +18,11 @@
 struct dw_edma;
 
 struct dw_edma_region {
-	phys_addr_t	paddr;
-	void __iomem	*vaddr;
+	u64		paddr;
+	union {
+		void		*mem;
+		void __iomem	*io;
+	} vaddr;
 	size_t		sz;
 };
 
@@ -39,12 +42,14 @@ struct dw_edma_region {
  */
 struct dw_edma_plat_ops {
 	int (*irq_vector)(struct device *dev, unsigned int nr);
+	u64 (*pci_address)(struct device *dev, phys_addr_t cpu_addr);
 };
 
 enum dw_edma_map_format {
 	EDMA_MF_EDMA_LEGACY = 0x0,
 	EDMA_MF_EDMA_UNROLL = 0x1,
-	EDMA_MF_HDMA_COMPAT = 0x5
+	EDMA_MF_HDMA_COMPAT = 0x5,
+	EDMA_MF_HDMA_NATIVE = 0x7,
 };
 
 /**
@@ -75,7 +80,6 @@ enum dw_edma_chip_flags {
  */
 struct dw_edma_chip {
 	struct device		*dev;
-	int			id;
 	int			nr_irqs;
 	const struct dw_edma_plat_ops	*ops;
 	u32			flags;
@@ -98,7 +102,7 @@ struct dw_edma_chip {
 };
 
 /* Export to the platform drivers */
-#if IS_ENABLED(CONFIG_DW_EDMA)
+#if IS_REACHABLE(CONFIG_DW_EDMA)
 int dw_edma_probe(struct dw_edma_chip *chip);
 int dw_edma_remove(struct dw_edma_chip *chip);
 #else

@@ -17,6 +17,7 @@
 #include <linux/bitops.h>
 #include <linux/mailbox_client.h>
 #include <linux/mailbox_controller.h>
+#include <linux/of.h>
 
 #include "mailbox.h"
 
@@ -508,10 +509,12 @@ static struct mbox_chan *
 of_mbox_index_xlate(struct mbox_controller *mbox,
 		    const struct of_phandle_args *sp)
 {
-	if (sp->args_count < 1 || sp->args[0] >= mbox->num_chans)
+	int ind = sp->args[0];
+
+	if (ind >= mbox->num_chans)
 		return ERR_PTR(-EINVAL);
 
-	return &mbox->chans[sp->args[0]];
+	return &mbox->chans[ind];
 }
 
 /**

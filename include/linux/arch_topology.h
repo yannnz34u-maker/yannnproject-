@@ -7,7 +7,6 @@
 
 #include <linux/types.h>
 #include <linux/percpu.h>
-#include <linux/android_vendor.h>
 
 void topology_normalize_cpu_scale(void);
 int topology_update_cpu_topology(void);
@@ -28,6 +27,13 @@ static inline unsigned long topology_get_cpu_scale(int cpu)
 
 void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity);
 
+DECLARE_PER_CPU(unsigned long, capacity_freq_ref);
+
+static inline unsigned long topology_get_freq_ref(int cpu)
+{
+	return per_cpu(capacity_freq_ref, cpu);
+}
+
 DECLARE_PER_CPU(unsigned long, arch_freq_scale);
 
 static inline unsigned long topology_get_freq_scale(int cpu)
@@ -43,6 +49,7 @@ enum scale_freq_source {
 	SCALE_FREQ_SOURCE_CPUFREQ = 0,
 	SCALE_FREQ_SOURCE_ARCH,
 	SCALE_FREQ_SOURCE_CPPC,
+	SCALE_FREQ_SOURCE_VIRT,
 };
 
 struct scale_freq_data {
@@ -73,8 +80,6 @@ struct cpu_topology {
 	cpumask_t core_sibling;
 	cpumask_t cluster_sibling;
 	cpumask_t llc_sibling;
-
-	ANDROID_VENDOR_DATA_ARRAY(1, 1);
 };
 
 #ifdef CONFIG_GENERIC_ARCH_TOPOLOGY
@@ -95,6 +100,7 @@ void update_siblings_masks(unsigned int cpu);
 void remove_cpu_topology(unsigned int cpuid);
 void reset_cpu_topology(void);
 int parse_acpi_topology(void);
+void freq_inv_set_max_ratio(int cpu, u64 max_rate);
 #endif
 extern bool topology_update_done;
 

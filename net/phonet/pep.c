@@ -963,10 +963,9 @@ static unsigned int pep_first_packet_length(struct sock *sk)
 	return len;
 }
 
-static int pep_ioctl(struct sock *sk, int cmd, unsigned long arg)
+static int pep_ioctl(struct sock *sk, int cmd, int *karg)
 {
 	struct pep_sock *pn = pep_sk(sk);
-	int answ;
 	int ret = -ENOIOCTLCMD;
 
 	switch (cmd) {
@@ -976,8 +975,8 @@ static int pep_ioctl(struct sock *sk, int cmd, unsigned long arg)
 			break;
 		}
 
-		answ = pep_first_packet_length(sk);
-		ret = put_user(answ, (int __user *)arg);
+		*karg = pep_first_packet_length(sk);
+		ret = 0;
 		break;
 
 	case SIOCPNENABLEPIPE:
