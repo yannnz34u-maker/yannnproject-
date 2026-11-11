@@ -772,7 +772,7 @@ static int brcm_sata_phy_probe(struct platform_device *pdev)
 
 	of_id = of_match_node(brcm_sata_phy_of_match, dn);
 	if (of_id)
-		priv->version = (enum brcm_sata_phy_version)of_id->data;
+		priv->version = (uintptr_t)of_id->data;
 	else
 		priv->version = BRCM_SATA_PHY_STB_28NM;
 
@@ -836,7 +836,7 @@ static int brcm_sata_phy_probe(struct platform_device *pdev)
 		return PTR_ERR(provider);
 	}
 
-	dev_info(dev, "registered %d port(s)\n", count);
+	dev_dbg(dev, "registered %d port(s)\n", count);
 
 	return 0;
 put_child:

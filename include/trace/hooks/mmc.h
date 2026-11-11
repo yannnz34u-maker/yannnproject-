@@ -10,18 +10,13 @@ struct mmc_host;
 struct mmc_card;
 struct mmc_queue;
 struct sdhci_host;
-
 /*
  * Following tracepoints are not exported in tracefs and provide a
  * mechanism for vendor modules to hook and extend functionality
  */
-DECLARE_HOOK(android_vh_mmc_blk_mq_rw_recovery,
-	TP_PROTO(struct mmc_card *card),
-	TP_ARGS(card));
-
-DECLARE_HOOK(android_vh_sd_update_bus_speed_mode,
-	TP_PROTO(struct mmc_card *card),
-	TP_ARGS(card));
+DECLARE_HOOK(android_vh_mmc_sdio_pm_flag_set,
+	TP_PROTO(struct mmc_host *host),
+	TP_ARGS(host));
 
 DECLARE_RESTRICTED_HOOK(android_rvh_mmc_suspend,
 	TP_PROTO(struct mmc_host *host),

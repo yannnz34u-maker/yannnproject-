@@ -117,8 +117,8 @@ struct packet_sock {
 	spinlock_t		bind_lock;
 	struct mutex		pg_vec_lock;
 	unsigned long		flags;
-	int			pressure;
 	int			ifindex;	/* bound device		*/
+	u8			vnet_hdr_sz;
 	__be16			num;
 	struct packet_rollover	*rollover;
 	struct packet_mclist	*mclist;
@@ -129,23 +129,20 @@ struct packet_sock {
 	unsigned int		tp_tstamp;
 	struct completion	skb_completion;
 	struct net_device __rcu	*cached_dev;
-	int			(*xmit)(struct sk_buff *skb);
 	struct packet_type	prot_hook ____cacheline_aligned_in_smp;
 	atomic_t		tp_drops ____cacheline_aligned_in_smp;
 };
 
-static inline struct packet_sock *pkt_sk(struct sock *sk)
-{
-	return (struct packet_sock *)sk;
-}
+#define pkt_sk(ptr) container_of_const(ptr, struct packet_sock, sk)
 
 enum packet_sock_flags {
 	PACKET_SOCK_ORIGDEV,
 	PACKET_SOCK_AUXDATA,
 	PACKET_SOCK_TX_HAS_OFF,
 	PACKET_SOCK_TP_LOSS,
-	PACKET_SOCK_HAS_VNET_HDR,
 	PACKET_SOCK_RUNNING,
+	PACKET_SOCK_PRESSURE,
+	PACKET_SOCK_QDISC_BYPASS,
 };
 
 static inline void packet_sock_flag_set(struct packet_sock *po,

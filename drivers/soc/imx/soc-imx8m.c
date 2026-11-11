@@ -302,3 +302,4 @@ static int __init imx8_soc_init(void)
 	return 0;
 }
 device_initcall(imx8_soc_init);
+MODULE_LICENSE("GPL");

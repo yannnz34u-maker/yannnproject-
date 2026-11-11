@@ -120,7 +120,6 @@
 #include <linux/export.h>
 #include <linux/backing-dev.h>
 #include <linux/task_io_accounting_ops.h>
-#include <linux/pagevec.h>
 #include <linux/pagemap.h>
 #include <linux/psi.h>
 #include <linux/syscalls.h>
@@ -167,7 +166,6 @@ static void read_pages(struct readahead_control *rac)
 		psi_memstall_enter(&rac->_pflags);
 	blk_start_plug(&plug);
 
-	trace_android_vh_read_pages(rac);
 	if (aops->readahead) {
 		aops->readahead(rac);
 		/*
@@ -253,6 +251,10 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			read_pages(ractl);
 			ractl->_index++;
 			i = ractl->_index + ractl->_nr_pages - index - 1;
+#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+			trace_android_vh_page_cache_ra_unbounded(mapping, folio,
+					&ractl->android_oem_data1);
+#endif
 			continue;
 		}
 
@@ -261,6 +263,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 		if (!folio)
 			break;
 		trace_android_vh_readahead_add_folio(folio, mapping);
+		trace_android_vh_page_cache_ra_mark(folio, nr_to_read - lookahead_size, i);
 		if (filemap_add_folio(mapping, folio, index + i,
 					gfp_mask) < 0) {
 			folio_put(folio);
@@ -273,6 +276,10 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			folio_set_readahead(folio);
 		ractl->_workingset |= folio_test_workingset(folio);
 		ractl->_nr_pages++;
+#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+		trace_android_vh_page_cache_ra_unbounded(mapping, folio,
+				&ractl->android_oem_data1);
+#endif
 	}
 
 	/*
@@ -335,6 +342,9 @@ void force_page_cache_ra(struct readahead_control *ractl,
 	index = readahead_index(ractl);
 	max_pages = max_t(unsigned long, bdi->io_pages, ra->ra_pages);
 	nr_to_read = min_t(unsigned long, nr_to_read, max_pages);
+#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+	trace_android_vh_force_page_cache_ra(mapping, &ractl->android_oem_data1);
+#endif
 	while (nr_to_read) {
 		unsigned long this_chunk = (2 * 1024 * 1024) / PAGE_SIZE;
 
@@ -475,19 +485,6 @@ static int try_context_readahead(struct address_space *mapping,
 	return 1;
 }
 
-/*
- * There are some parts of the kernel which assume that PMD entries
- * are exactly HPAGE_PMD_ORDER.  Those should be fixed, but until then,
- * limit the maximum allocation order to PMD size.  I'm not aware of any
- * assumptions about maximum order if THP are disabled, but 8 seems like
- * a good order (that's 1MB if you're using 4kB pages)
- */
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-#define MAX_PAGECACHE_ORDER	HPAGE_PMD_ORDER
-#else
-#define MAX_PAGECACHE_ORDER	8
-#endif
-
 static inline int ra_alloc_folio(struct readahead_control *ractl, pgoff_t index,
 		pgoff_t mark, unsigned int order, gfp_t gfp)
 {
@@ -548,16 +545,11 @@ void page_cache_ra_order(struct readahead_control *ractl,
 		unsigned int order = new_order;
 
 		/* Align with smaller pages if needed */
-		if (index & ((1UL << order) - 1)) {
+		if (index & ((1UL << order) - 1))
 			order = __ffs(index);
-			if (order == 1)
-				order = 0;
-		}
 		/* Don't allocate pages past EOF */
-		while (index + (1UL << order) - 1 > limit) {
-			if (--order == 1)
-				order = 0;
-		}
+		while (index + (1UL << order) - 1 > limit)
+			order--;
 		err = ra_alloc_folio(ractl, index, mark, order, gfp);
 		if (err)
 			break;
@@ -717,6 +709,8 @@ void page_cache_sync_ra(struct readahead_control *ractl,
 {
 	bool do_forced_ra = ractl->file && (ractl->file->f_mode & FMODE_RANDOM);
 
+	trace_android_vh_page_cache_read(ractl->mapping->host,
+			readahead_index(ractl), req_count);
 	/*
 	 * Even if readahead is disabled, issue this request as readahead
 	 * as we'll need it to satisfy the requested range. The forced
@@ -743,6 +737,8 @@ EXPORT_SYMBOL_GPL(page_cache_sync_ra);
 void page_cache_async_ra(struct readahead_control *ractl,
 		struct folio *folio, unsigned long req_count)
 {
+	trace_android_vh_page_cache_read(ractl->mapping->host,
+			readahead_index(ractl), req_count);
 	/* no readahead */
 	if (!ractl->ra->ra_pages)
 		return;
@@ -832,22 +828,26 @@ void readahead_expand(struct readahead_control *ractl,
 	/* Expand the leading edge downwards */
 	while (ractl->_index > new_index) {
 		unsigned long index = ractl->_index - 1;
-		struct page *page = xa_load(&mapping->i_pages, index);
+		struct folio *folio = xa_load(&mapping->i_pages, index);
 
-		if (page && !xa_is_value(page))
-			return; /* Page apparently present */
+		if (folio && !xa_is_value(folio))
+			return; /* Folio apparently present */
 
-		page = __page_cache_alloc(gfp_mask);
-		if (!page)
+		folio = filemap_alloc_folio(gfp_mask, 0);
+		if (!folio)
 			return;
-		trace_android_vh_readahead_add_folio(page_folio(page), mapping);
-		if (add_to_page_cache_lru(page, mapping, index, gfp_mask) < 0) {
-			put_page(page);
+		trace_android_vh_readahead_add_folio(folio, mapping);
+		if (filemap_add_folio(mapping, folio, index, gfp_mask) < 0) {
+			folio_put(folio);
 			return;
 		}
-
+		if (unlikely(folio_test_workingset(folio)) &&
+				!ractl->_workingset) {
+			ractl->_workingset = true;
+			psi_memstall_enter(&ractl->_pflags);
+		}
 		ractl->_nr_pages++;
-		ractl->_index = page->index;
+		ractl->_index = folio->index;
 	}
 
 	new_len += new_start - readahead_pos(ractl);
@@ -856,20 +856,21 @@ void readahead_expand(struct readahead_control *ractl,
 	/* Expand the trailing edge upwards */
 	while (ractl->_nr_pages < new_nr_pages) {
 		unsigned long index = ractl->_index + ractl->_nr_pages;
-		struct page *page = xa_load(&mapping->i_pages, index);
+		struct folio *folio = xa_load(&mapping->i_pages, index);
 
-		if (page && !xa_is_value(page))
-			return; /* Page apparently present */
+		if (folio && !xa_is_value(folio))
+			return; /* Folio apparently present */
 
-		page = __page_cache_alloc(gfp_mask);
-		if (!page)
+		folio = filemap_alloc_folio(gfp_mask, 0);
+		if (!folio)
 			return;
-		trace_android_vh_readahead_add_folio(page_folio(page), mapping);
-		if (add_to_page_cache_lru(page, mapping, index, gfp_mask) < 0) {
-			put_page(page);
+		trace_android_vh_readahead_add_folio(folio, mapping);
+		if (filemap_add_folio(mapping, folio, index, gfp_mask) < 0) {
+			folio_put(folio);
 			return;
 		}
-		if (unlikely(PageWorkingset(page)) && !ractl->_workingset) {
+		if (unlikely(folio_test_workingset(folio)) &&
+				!ractl->_workingset) {
 			ractl->_workingset = true;
 			psi_memstall_enter(&ractl->_pflags);
 		}

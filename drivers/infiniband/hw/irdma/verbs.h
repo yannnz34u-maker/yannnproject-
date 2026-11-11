@@ -100,6 +100,9 @@ struct irdma_mr {
 		struct ib_mw ibmw;
 	};
 	struct ib_umem *region;
+	int access;
+	bool is_hwreg:1;
+	bool dma_mr:1;
 	u16 type;
 	u32 page_cnt;
 	u64 page_size;
@@ -119,6 +122,8 @@ struct irdma_cq {
 	enum irdma_cmpl_notify last_notify;
 	struct irdma_dma_mem kmem;
 	struct irdma_dma_mem kmem_shadow;
+	struct completion free_cq;
+	refcount_t refcnt;
 	spinlock_t lock; /* for poll cq */
 	struct list_head resize_list;
 	struct irdma_cq_poll_info cur_cqe;

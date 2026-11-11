@@ -80,7 +80,6 @@ config ANDROID_DEBUG_KINFO
 
 config ANDROID_KABI_RESERVE
 	bool "Android KABI reserve padding"
-	depends on 64BIT
 	default y
 	help
 	  This option enables the padding that the Android GKI kernel adds
@@ -97,7 +96,6 @@ config ANDROID_KABI_RESERVE
 
 config ANDROID_VENDOR_OEM_DATA
 	bool "Android vendor and OEM data padding"
-	depends on 64BIT
 	default y
 	help
 	  This option enables the padding that the Android GKI kernel adds
@@ -114,5 +112,15 @@ config ANDROID_VENDOR_OEM_DATA
 	  NOT be supported by the Google Android kernel team.
 
 	  If even slightly unsure, say Y.
+
+config ANDROID_WRAPFD
+	bool "WrapFD Driver"
+	depends on MMU
+	help
+	  Enable WrapFD driver to control ability to map a file
+
+	  WrapFD allows wrapping an fd representing a memory buffer into a new
+	  file supporting ioctl API for file ownership that controls ability to
+	  map the file.
 
 endmenu

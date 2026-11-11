@@ -5,11 +5,14 @@
 
 #include <linux/uuid.h>
 #include <asm/unaligned.h>
+#include "messages.h"
 #include "ctree.h"
 #include "transaction.h"
 #include "disk-io.h"
 #include "print-tree.h"
-
+#include "fs.h"
+#include "accessors.h"
+#include "uuid-tree.h"
 
 static void btrfs_uuid_to_key(u8 *uuid, u8 type, struct btrfs_key *key)
 {
@@ -121,7 +124,7 @@ int btrfs_uuid_tree_add(struct btrfs_trans_handle *trans, u8 *uuid, u8 type,
 		 * An item with that type already exists.
 		 * Extend the item and store the new subid at the end.
 		 */
-		btrfs_extend_item(path, sizeof(subid_le));
+		btrfs_extend_item(trans, path, sizeof(subid_le));
 		eb = path->nodes[0];
 		slot = path->slots[0];
 		offset = btrfs_item_ptr_offset(eb, slot);
@@ -136,7 +139,7 @@ int btrfs_uuid_tree_add(struct btrfs_trans_handle *trans, u8 *uuid, u8 type,
 	ret = 0;
 	subid_le = cpu_to_le64(subid_cpu);
 	write_extent_buffer(eb, &subid_le, offset, sizeof(subid_le));
-	btrfs_mark_buffer_dirty(eb);
+	btrfs_mark_buffer_dirty(trans, eb);
 
 out:
 	btrfs_free_path(path);
@@ -218,7 +221,7 @@ int btrfs_uuid_tree_remove(struct btrfs_trans_handle *trans, u8 *uuid, u8 type,
 	move_src = offset + sizeof(subid);
 	move_len = item_size - (move_src - btrfs_item_ptr_offset(eb, slot));
 	memmove_extent_buffer(eb, move_dst, move_src, move_len);
-	btrfs_truncate_item(path, item_size - sizeof(subid), 1);
+	btrfs_truncate_item(trans, path, item_size - sizeof(subid), 1);
 
 out:
 	btrfs_free_path(path);
@@ -235,40 +238,37 @@ out:
 int btrfs_uuid_tree_check_overflow(struct btrfs_fs_info *fs_info,
 				   u8 *uuid, u8 type)
 {
-	struct btrfs_path *path = NULL;
+	struct btrfs_path *path;
 	int ret;
 	u32 item_size;
 	struct btrfs_key key;
 
-	if (WARN_ON_ONCE(!fs_info->uuid_root)) {
-		ret = -EINVAL;
-		goto out;
-	}
+	if (WARN_ON_ONCE(!fs_info->uuid_root))
+		return -EINVAL;
 
 	path = btrfs_alloc_path();
-	if (!path) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	if (!path)
+		return -ENOMEM;
 
 	btrfs_uuid_to_key(uuid, type, &key);
 	ret = btrfs_search_slot(NULL, fs_info->uuid_root, &key, path, 0, 0);
-	if (ret < 0)
-		goto out;
+	if (ret < 0) {
+		btrfs_free_path(path);
+		return ret;
+	}
 	if (ret > 0) {
-		ret = 0;
-		goto out;
+		btrfs_free_path(path);
+		return 0;
 	}
 
 	item_size = btrfs_item_size(path->nodes[0], path->slots[0]);
+	btrfs_free_path(path);
 
 	if (sizeof(struct btrfs_item) + item_size + sizeof(u64) >
 	    BTRFS_LEAF_DATA_SIZE(fs_info))
-		ret = -EOVERFLOW;
+		return -EOVERFLOW;
 
-out:
-	btrfs_free_path(path);
-	return ret;
+	return 0;
 }
 
 static int btrfs_uuid_iter_rem(struct btrfs_root *uuid_root, u8 *uuid, u8 type,

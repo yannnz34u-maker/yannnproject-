@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/compat.h>
 #include <linux/device.h>
+#include <linux/io.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/miscdevice.h>
@@ -85,7 +86,7 @@ static int chsc_subchannel_probe(struct subchannel *sch)
 	if (!private)
 		return -ENOMEM;
 	dev_set_drvdata(&sch->dev, private);
-	ret = cio_enable_subchannel(sch, (u32)(unsigned long)sch);
+	ret = cio_enable_subchannel(sch, (u32)virt_to_phys(sch));
 	if (ret) {
 		CHSC_MSG(0, "Failed to enable 0.%x.%04x: %d\n",
 			 sch->schid.ssid, sch->schid.sch_no, ret);
@@ -210,10 +211,10 @@ static int chsc_async(struct chsc_async_area *chsc_area,
 
 	chsc_area->header.key = PAGE_DEFAULT_KEY >> 4;
 	while ((sch = chsc_get_next_subchannel(sch))) {
-		spin_lock(sch->lock);
+		spin_lock(&sch->lock);
 		private = dev_get_drvdata(&sch->dev);
 		if (private->request) {
-			spin_unlock(sch->lock);
+			spin_unlock(&sch->lock);
 			ret = -EBUSY;
 			continue;
 		}
@@ -238,7 +239,7 @@ static int chsc_async(struct chsc_async_area *chsc_area,
 		default:
 			ret = -ENODEV;
 		}
-		spin_unlock(sch->lock);
+		spin_unlock(&sch->lock);
 		CHSC_MSG(2, "chsc on 0.%x.%04x returned cc=%d\n",
 			 sch->schid.ssid, sch->schid.sch_no, cc);
 		if (ret == -EINPROGRESS)

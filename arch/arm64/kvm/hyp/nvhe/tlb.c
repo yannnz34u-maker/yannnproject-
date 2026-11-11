@@ -17,7 +17,8 @@ struct tlb_inv_context {
 };
 
 static void enter_vmid_context(struct kvm_s2_mmu *mmu,
-			       struct tlb_inv_context *cxt)
+			       struct tlb_inv_context *cxt,
+			       bool nsh)
 {
 	struct kvm_s2_mmu *host_s2_mmu = &host_mmu.arch.mmu;
 	struct kvm_cpu_context *host_ctxt;
@@ -26,6 +27,28 @@ static void enter_vmid_context(struct kvm_s2_mmu *mmu,
 	host_ctxt = &this_cpu_ptr(&kvm_host_data)->host_ctxt;
 	vcpu = host_ctxt->__hyp_running_vcpu;
 	cxt->mmu = NULL;
+
+	/*
+	 * We have two requirements:
+	 *
+	 * - ensure that the page table updates are visible to all
+	 *   CPUs, for which a dsb(DOMAIN-st) is what we need, DOMAIN
+	 *   being either ish or nsh, depending on the invalidation
+	 *   type.
+	 *
+	 * - complete any speculative page table walk started before
+	 *   we trapped to EL2 so that we can mess with the MM
+	 *   registers out of context, for which dsb(nsh) is enough
+	 *
+	 * The composition of these two barriers is a dsb(DOMAIN), and
+	 * the 'nsh' parameter tracks the distinction between
+	 * Inner-Shareable and Non-Shareable, as specified by the
+	 * callers.
+	 */
+	if (nsh)
+		dsb(nsh);
+	else
+		dsb(ish);
 
 	/*
 	 * If we're already in the desired context, then there's nothing
@@ -126,10 +149,8 @@ void __kvm_tlb_flush_vmid_ipa(struct kvm_s2_mmu *mmu,
 {
 	struct tlb_inv_context cxt;
 
-	dsb(ishst);
-
 	/* Switch to requested VMID */
-	enter_vmid_context(mmu, &cxt);
+	enter_vmid_context(mmu, &cxt, false);
 
 	/*
 	 * We could do so much better if we had the VA as well.
@@ -153,14 +174,68 @@ void __kvm_tlb_flush_vmid_ipa(struct kvm_s2_mmu *mmu,
 	exit_vmid_context(&cxt);
 }
 
+void __kvm_tlb_flush_vmid_ipa_nsh(struct kvm_s2_mmu *mmu,
+				  phys_addr_t ipa, int level)
+{
+	struct tlb_inv_context cxt;
+
+	/* Switch to requested VMID */
+	enter_vmid_context(mmu, &cxt, true);
+
+	/*
+	 * We could do so much better if we had the VA as well.
+	 * Instead, we invalidate Stage-2 for this IPA, and the
+	 * whole of Stage-1. Weep...
+	 */
+	ipa >>= 12;
+	__tlbi_level(ipas2e1, ipa, level);
+
+	/*
+	 * We have to ensure completion of the invalidation at Stage-2,
+	 * since a table walk on another CPU could refill a TLB with a
+	 * complete (S1 + S2) walk based on the old Stage-2 mapping if
+	 * the Stage-1 invalidation happened first.
+	 */
+	dsb(nsh);
+	__tlbi(vmalle1);
+	dsb(nsh);
+	isb();
+
+	exit_vmid_context(&cxt);
+}
+
+void __kvm_tlb_flush_vmid_range(struct kvm_s2_mmu *mmu,
+				phys_addr_t start, unsigned long pages)
+{
+	struct tlb_inv_context cxt;
+	unsigned long stride;
+
+	/*
+	 * Since the range of addresses may not be mapped at
+	 * the same level, assume the worst case as PAGE_SIZE
+	 */
+	stride = PAGE_SIZE;
+	start = round_down(start, stride);
+
+	/* Switch to requested VMID */
+	enter_vmid_context(mmu, &cxt, false);
+
+	__flush_s2_tlb_range_op(ipas2e1is, start, pages, stride, 0);
+
+	dsb(ish);
+	__tlbi(vmalle1is);
+	__tlbi_sync_s1ish_hyp();
+	isb();
+
+	exit_vmid_context(&cxt);
+}
+
 void __kvm_tlb_flush_vmid(struct kvm_s2_mmu *mmu)
 {
 	struct tlb_inv_context cxt;
 
-	dsb(ishst);
-
 	/* Switch to requested VMID */
-	enter_vmid_context(mmu, &cxt);
+	enter_vmid_context(mmu, &cxt, false);
 
 	__tlbi(vmalls12e1is);
 	__tlbi_sync_s1ish_hyp();
@@ -174,7 +249,7 @@ void __kvm_flush_cpu_context(struct kvm_s2_mmu *mmu)
 	struct tlb_inv_context cxt;
 
 	/* Switch to requested VMID */
-	enter_vmid_context(mmu, &cxt);
+	enter_vmid_context(mmu, &cxt, false);
 
 	__tlbi(vmalle1);
 	asm volatile("ic iallu");
@@ -186,7 +261,8 @@ void __kvm_flush_cpu_context(struct kvm_s2_mmu *mmu)
 
 void __kvm_flush_vm_context(void)
 {
-	dsb(ishst);
+	/* Same remark as in enter_vmid_context() */
+	dsb(ish);
 	__tlbi(alle1is);
 	__tlbi_sync_s1ish_hyp();
 }

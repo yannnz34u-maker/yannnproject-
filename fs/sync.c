@@ -69,7 +69,7 @@ int sync_filesystem(struct super_block *sb)
 	}
 	return sync_blockdev(sb->s_bdev);
 }
-EXPORT_SYMBOL(sync_filesystem);
+EXPORT_SYMBOL_NS(sync_filesystem, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 static void sync_inodes_one_sb(struct super_block *sb, void *arg)
 {
@@ -142,7 +142,6 @@ void emergency_sync(void)
 		schedule_work(work);
 	}
 }
-EXPORT_SYMBOL(emergency_sync);
 
 /*
  * sync a single super

@@ -65,6 +65,9 @@ static enum drm_gpu_sched_stat amdgpu_job_timedout(struct drm_sched_job *s_job)
 	DRM_ERROR("Process information: process %s pid %d thread %s pid %d\n",
 		  ti.process_name, ti.tgid, ti.task_name, ti.pid);
 
+	if (dma_fence_get_status(&s_job->s_fence->finished) == 0)
+		dma_fence_set_error(&s_job->s_fence->finished, -ETIME);
+
 	if (amdgpu_device_should_recover_gpu(ring->adev)) {
 		struct amdgpu_reset_context reset_context;
 		memset(&reset_context, 0, sizeof(reset_context));
@@ -106,9 +109,8 @@ int amdgpu_job_alloc(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	(*job)->base.sched = &adev->rings[0]->sched;
 	(*job)->vm = vm;
 
-	amdgpu_sync_create(&(*job)->sync);
-	amdgpu_sync_create(&(*job)->sched_sync);
-	(*job)->vram_lost_counter = atomic_read(&adev->vram_lost_counter);
+	amdgpu_sync_create(&(*job)->explicit_sync);
+	(*job)->generation = amdgpu_vm_generation(adev, vm);
 	(*job)->vm_pd_addr = AMDGPU_BO_INVALID_OFFSET;
 
 	if (!entity)
@@ -164,8 +166,8 @@ void amdgpu_job_free_resources(struct amdgpu_job *job)
 	/* Check if any fences where initialized */
 	if (job->base.s_fence && job->base.s_fence->finished.ops)
 		f = &job->base.s_fence->finished;
-	else if (job->hw_fence.ops)
-		f = &job->hw_fence;
+	else if (job->hw_fence.base.ops)
+		f = &job->hw_fence.base;
 	else
 		f = NULL;
 
@@ -179,14 +181,13 @@ static void amdgpu_job_free_cb(struct drm_sched_job *s_job)
 
 	drm_sched_job_cleanup(s_job);
 
-	amdgpu_sync_free(&job->sync);
-	amdgpu_sync_free(&job->sched_sync);
+	amdgpu_sync_free(&job->explicit_sync);
 
 	/* only put the hw fence if has embedded fence */
-	if (!job->hw_fence.ops)
+	if (!job->hw_fence.base.ops)
 		kfree(job);
 	else
-		dma_fence_put(&job->hw_fence);
+		dma_fence_put(&job->hw_fence.base);
 }
 
 void amdgpu_job_set_gang_leader(struct amdgpu_job *job,
@@ -211,15 +212,14 @@ void amdgpu_job_free(struct amdgpu_job *job)
 		drm_sched_job_cleanup(&job->base);
 
 	amdgpu_job_free_resources(job);
-	amdgpu_sync_free(&job->sync);
-	amdgpu_sync_free(&job->sched_sync);
+	amdgpu_sync_free(&job->explicit_sync);
 	if (job->gang_submit != &job->base.s_fence->scheduled)
 		dma_fence_put(job->gang_submit);
 
-	if (!job->hw_fence.ops)
+	if (!job->hw_fence.base.ops)
 		kfree(job);
 	else
-		dma_fence_put(&job->hw_fence);
+		dma_fence_put(&job->hw_fence.base);
 }
 
 struct dma_fence *amdgpu_job_submit(struct amdgpu_job *job)
@@ -249,36 +249,35 @@ int amdgpu_job_submit_direct(struct amdgpu_job *job, struct amdgpu_ring *ring,
 	return 0;
 }
 
-static struct dma_fence *amdgpu_job_dependency(struct drm_sched_job *sched_job,
-					       struct drm_sched_entity *s_entity)
+static struct dma_fence *
+amdgpu_job_prepare_job(struct drm_sched_job *sched_job,
+		      struct drm_sched_entity *s_entity)
 {
 	struct amdgpu_ring *ring = to_amdgpu_ring(s_entity->rq->sched);
 	struct amdgpu_job *job = to_amdgpu_job(sched_job);
-	struct amdgpu_vm *vm = job->vm;
-	struct dma_fence *fence;
+	struct dma_fence *fence = NULL;
 	int r;
 
-	fence = amdgpu_sync_get_fence(&job->sync);
-	if (fence && drm_sched_dependency_optimized(fence, s_entity)) {
-		r = amdgpu_sync_fence(&job->sched_sync, fence);
-		if (r)
-			DRM_ERROR("Error adding fence (%d)\n", r);
-	}
+	r = drm_sched_entity_error(s_entity);
+	if (r)
+		goto error;
 
 	if (!fence && job->gang_submit)
 		fence = amdgpu_device_switch_gang(ring->adev, job->gang_submit);
 
-	while (fence == NULL && vm && !job->vmid) {
-		r = amdgpu_vmid_grab(vm, ring, &job->sync,
-				     &job->base.s_fence->finished,
-				     job);
-		if (r)
+	while (!fence && job->vm && !job->vmid) {
+		r = amdgpu_vmid_grab(job->vm, ring, job, &fence);
+		if (r) {
 			DRM_ERROR("Error getting VM ID (%d)\n", r);
-
-		fence = amdgpu_sync_get_fence(&job->sync);
+			goto error;
+		}
 	}
 
 	return fence;
+
+error:
+	dma_fence_set_error(&job->base.s_fence->finished, r);
+	return NULL;
 }
 
 static struct dma_fence *amdgpu_job_run(struct drm_sched_job *sched_job)
@@ -292,12 +291,10 @@ static struct dma_fence *amdgpu_job_run(struct drm_sched_job *sched_job)
 	job = to_amdgpu_job(sched_job);
 	finished = &job->base.s_fence->finished;
 
-	BUG_ON(amdgpu_sync_peek_fence(&job->sync, NULL));
-
 	trace_amdgpu_sched_run_job(job);
 
 	/* Skip job if VRAM is lost and never resubmit gangs */
-	if (job->vram_lost_counter != atomic_read(&adev->vram_lost_counter) ||
+	if (job->generation != amdgpu_vm_generation(adev, job->vm) ||
 	    (job->job_run_counter && job->gang_submit))
 		dma_fence_set_error(finished, -ECANCELED);
 
@@ -355,7 +352,7 @@ void amdgpu_job_stop_all_jobs_on_sched(struct drm_gpu_scheduler *sched)
 }
 
 const struct drm_sched_backend_ops amdgpu_sched_ops = {
-	.dependency = amdgpu_job_dependency,
+	.prepare_job = amdgpu_job_prepare_job,
 	.run_job = amdgpu_job_run,
 	.timedout_job = amdgpu_job_timedout,
 	.free_job = amdgpu_job_free_cb

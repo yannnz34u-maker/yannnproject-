@@ -1,24 +1,42 @@
-name: Malachite GKI 6.1 Build
+name: Specter-Chagall - GKI 6.6.143
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_bbrv3:
+        description: "Enable BBRv3 with automatic BBR fallback"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Malachite GKI
+    name: Specter-Chagall GKI 6.6.143
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      - name: Checkout kernel
+      # Checkout dengan branch main-17t
+      - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
+          ref: main-17t
           path: kernel
 
-      - name: Install dependencies
+      # Free Disk Space
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -26,63 +44,238 @@ jobs:
             git curl wget zip unzip \
             libssl-dev libelf-dev \
             python3 python3-pip \
-            clang llvm lld pahole \
-            device-tree-compiler rsync
+            clang llvm lld \
+            pahole lz4 kmod \
+            device-tree-compiler \
+            rsync ccache patch
 
-      - name: Clone Malachite device tree
+      # AnyKernel3
+      - name: Clone AnyKernel3
         run: |
           git clone --depth=1 \
-            https://github.com/malachite-project/android_device_xiaomi_malachite.git \
-            device_tree
+            https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-      - name: Check sources
+      # Verify Source
+      - name: Verify Kernel Source
         run: |
-          echo "===== KERNEL ====="
+          set -e
           cd kernel
+
+          echo "===== KERNEL VERSION ====="
           make -s kernelversion
+
+          echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
 
-          echo "===== DEFCONFIG ====="
-          find arch/arm64/configs -name '*defconfig'
-
-          echo "===== DEVICE TREE ====="
-          cd ../device_tree
-          git log -1 --oneline
-          find . -maxdepth 3 -type f | head -100
-
-      - name: Configure kernel
+      # Kernel Configuration
+      - name: Configure GKI Defconfig
         run: |
+          set -e
           cd kernel
-          make O=out ARCH=arm64 LLVM=1 gki_defconfig
 
-      - name: Build kernel
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+
+          ./scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Specter-Chagall" \
+            -d MODULE_SIG_PROTECT \
+            -e MODULES \
+            -e MODULE_UNLOAD \
+            -d MODULE_SIG_FORCE \
+            -e TCP_CONG_BBR \
+            -e DEFAULT_BBR \
+            -e NET_SCH_FQ
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+          echo "===== NETWORK CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
+
+      # BBRv3
+      - name: Try BBRv3 With Automatic BBR Fallback
         run: |
+          set -e
           cd kernel
+
+          ORIGINAL="net/ipv4/tcp_bbr.c"
+          BACKUP="$RUNNER_TEMP/tcp_bbr_v1.c"
+
+          cp "$ORIGINAL" "$BACKUP"
+
+          if [ "${{ inputs.enable_bbrv3 }}" = "true" ]; then
+            echo "===== TRYING GOOGLE BBRv3 ====="
+
+            if curl -fL \
+              https://raw.githubusercontent.com/google/bbr/v3/net/ipv4/tcp_bbr.c \
+              -o "$RUNNER_TEMP/tcp_bbr_v3.c"; then
+
+              cp "$RUNNER_TEMP/tcp_bbr_v3.c" "$ORIGINAL"
+
+              if make -j"$(nproc)" \
+                O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                KBUILD_BUILD_USER=Yannz34u KBUILD_BUILD_HOST=Yannz34u \
+                net/ipv4/tcp_bbr.o; then
+
+                echo "BBRv3 object compilation successful"
+                echo "BBR_VARIANT=BBRv3" >> "$GITHUB_ENV"
+
+              else
+                echo "::warning::BBRv3 incompatible; restoring original BBR"
+
+                cp "$BACKUP" "$ORIGINAL"
+
+                rm -f out/net/ipv4/tcp_bbr.o \
+                  out/net/ipv4/.tcp_bbr.o.cmd
+
+                make -j"$(nproc)" \
+                  O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                  KBUILD_BUILD_USER=Yannz34u KBUILD_BUILD_HOST=Yannz34u \
+                  net/ipv4/tcp_bbr.o
+
+                echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
+              fi
+
+            else
+              echo "::warning::Unable to download BBRv3; using original BBR"
+              cp "$BACKUP" "$ORIGINAL"
+              echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
+            fi
+
+          else
+            echo "BBRv3 disabled; using original BBR"
+            echo "BBR_VARIANT=BBR" >> "$GITHUB_ENV"
+          fi
+
+      # Final Configuration
+      - name: Final Kernel Configuration
+        run: |
+          set -e
+          cd kernel
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+          echo "===== FINAL NETWORK CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
+
+      # Compile Kernel
+      - name: Compile GKI Kernel
+        run: |
+          set -e
+          cd kernel
+
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
-            Image.gz \
-            dtbs \
-            modules
+            LLVM_IAS=1 \
+            KBUILD_BUILD_USER=Yannz34u \
+            KBUILD_BUILD_HOST=Yannz34u \
+            Image
 
-      - name: Verify output
+          echo "===== BUILD SUCCESS ====="
+          echo "BBR: $BBR_VARIANT"
+
+      # Verify Image
+      - name: Verify Kernel Image Output
         run: |
-          cd kernel
-          test -s out/arch/arm64/boot/Image.gz
-          find out/arch/arm64/boot -type f
+          set -e
 
-      - name: Package kernel
+          test -s kernel/out/arch/arm64/boot/Image
+
+          echo "===== KERNEL OUTPUT ====="
+          ls -lh kernel/out/arch/arm64/boot/Image
+
+      # Prepare AnyKernel3
+      - name: Prepare AnyKernel3
+        run: |
+          set -e
+
+          mkdir -p release
+
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+
+          cat > AnyKernel3/anykernel.sh <<'AK3EOF'
+          properties() {
+            kernel.string=Specter-Chagall-GKI-6.6.143
+            do.devicecheck=1
+            do.modules=0
+            do.systemless=1
+            do.cleanup=1
+            do.cleanuponabort=0
+            device.name1=chagall
+            device.name2=chagall
+            supported.versions=
+          }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          ui_print " "
+          ui_print "  ____  ____  _____ ____ _____ _____ ____"
+          ui_print " / ___||  _ \| ____/ ___|_   _| ____|  _ \\"
+          ui_print " \___ \| |_) |  _| \___ \ | | |  _| | |_) |"
+          ui_print "  ___) |  __/| |___ ___) || | | |___|  _ <"
+          ui_print " |____/|_|   |_____|____/ |_| |_____|_| \_\\"
+          ui_print " "
+          ui_print "          CHAGALL"
+          ui_print " "
+          ui_print "       GKI 6.6.143"
+          ui_print "       BY YANNZ34U"
+          ui_print " "
+
+          split_boot;
+          flash_boot;
+
+          ui_print " "
+          ui_print "  Specter-Chagall installed!"
+          ui_print "  Reboot your device."
+          ui_print " "
+          AK3EOF
+
+      # Package ZIP
+      - name: Pack AnyKernel3 ZIP
+        run: |
+          set -e
+          cd AnyKernel3
+
+          zip -r9 ../release/Specter-Chagall-GKI-6.6.143.zip . \
+            -x '.git/*' \
+            -x 'README.md' \
+            -x '*placeholder*'
+
+      # Build Information
+      - name: Generate Build Information
         run: |
           mkdir -p release
-          cp kernel/out/arch/arm64/boot/Image.gz release/
 
-          cd release
-          zip -r Malachite-GKI-6.1.zip .
+          cat > release/BUILD_INFO.txt <<EOF
+          Project: Specter-Chagall
+          Branch: main-17t
+          Device: Chagall Xiaomi 17t
+          Kernel: GKI 6.6.143
+          Builder: Yannz34u@Yannz34u
+          Compiler: Ubuntu LLVM/Clang
+          Architecture: ARM64
+          BBR: $BBR_VARIANT
+          Localversion: -Specter-Chagall
+          Package: AnyKernel3
+          EOF
 
-      - name: Upload artifact
+      # Upload Kernel
+      - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Malachite-GKI-6.1
-          path: release/Malachite-GKI-6.1.zip
+          name: Specter-Chagall-GKI-6.6.143
+          path: release/Specter-Chagall-GKI-6.6.143.zip
+          retention-days: 14
+
+      # Upload Build Info
+      - name: Upload Build Information
+        uses: actions/upload-artifact@v4
+        with:
+          name: Specter-Chagall-Build-Info
+          path: release/BUILD_INFO.txt
           retention-days: 14

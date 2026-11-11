@@ -243,13 +243,10 @@ static int __io_sync_cancel(struct io_uring_task *tctx,
 	/* fixed must be grabbed every time since we drop the uring_lock */
 	if ((cd->flags & IORING_ASYNC_CANCEL_FD) &&
 	    (cd->flags & IORING_ASYNC_CANCEL_FD_FIXED)) {
-		unsigned long file_ptr;
-
 		if (unlikely(fd >= ctx->nr_user_files))
 			return -EBADF;
 		fd = array_index_nospec(fd, ctx->nr_user_files);
-		file_ptr = io_fixed_file_slot(&ctx->file_table, fd)->file_ptr;
-		cd->file = (struct file *) (file_ptr & FFS_MASK);
+		cd->file = io_file_from_index(&ctx->file_table, fd);
 		if (!cd->file)
 			return -EBADF;
 	}
@@ -266,27 +263,32 @@ int io_sync_cancel(struct io_ring_ctx *ctx, void __user *arg)
 	};
 	ktime_t timeout = KTIME_MAX;
 	struct io_uring_sync_cancel_reg sc;
-	struct fd f = { };
+	struct file *file = NULL;
 	DEFINE_WAIT(wait);
-	int ret;
+	int ret, i;
 
 	if (copy_from_user(&sc, arg, sizeof(sc)))
 		return -EFAULT;
 	if (sc.flags & ~CANCEL_FLAGS)
 		return -EINVAL;
-	if (sc.pad[0] || sc.pad[1] || sc.pad[2] || sc.pad[3])
-		return -EINVAL;
+	for (i = 0; i < ARRAY_SIZE(sc.pad); i++)
+		if (sc.pad[i])
+			return -EINVAL;
+	for (i = 0; i < ARRAY_SIZE(sc.pad2); i++)
+		if (sc.pad2[i])
+			return -EINVAL;
 
 	cd.data = sc.addr;
 	cd.flags = sc.flags;
+	cd.opcode = sc.opcode;
 
 	/* we can grab a normal file descriptor upfront */
 	if ((cd.flags & IORING_ASYNC_CANCEL_FD) &&
 	   !(cd.flags & IORING_ASYNC_CANCEL_FD_FIXED)) {
-		f = fdget(sc.fd);
-		if (!f.file)
+		file = fget(sc.fd);
+		if (!file)
 			return -EBADF;
-		cd.file = f.file;
+		cd.file = file;
 	}
 
 	ret = __io_sync_cancel(current->io_uring, &cd, sc.fd);
@@ -336,6 +338,7 @@ int io_sync_cancel(struct io_ring_ctx *ctx, void __user *arg)
 	if (ret == -ENOENT || ret > 0)
 		ret = 0;
 out:
-	fdput(f);
+	if (file)
+		fput(file);
 	return ret;
 }

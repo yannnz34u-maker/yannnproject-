@@ -24,6 +24,7 @@
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/console.h>
+#include <linux/kstrtox.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
 #include <linux/kfifo.h>
@@ -564,20 +565,12 @@ static int gs_start_io(struct gs_port *port)
 	port->n_read = 0;
 	started = gs_start_rx(port);
 
-	/*
-	 * The TTY may be set to NULL by gs_close() after gs_start_rx() or
-	 * gs_start_tx() release locks for endpoint request submission.
-	 */
-	if (!port->port.tty)
-		goto out;
-
 	if (started) {
 		gs_start_tx(port);
 		/* Unblock any pending writes into our circular buffer, in case
 		 * we didn't in gs_start_tx() */
 		tty_port_tty_wakeup(&port->port);
 	} else {
-out:
 		/* Free reqs only if we are still connected */
 		if (port->port_usb) {
 			gs_free_requests(ep, head, &port->read_allocated);
@@ -740,12 +733,12 @@ exit:
 	spin_unlock_irq(&port->port_lock);
 }
 
-static int gs_write(struct tty_struct *tty, const unsigned char *buf, int count)
+static ssize_t gs_write(struct tty_struct *tty, const u8 *buf, size_t count)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
 
-	pr_vdebug("gs_write: ttyGS%d (%p) writing %d bytes\n",
+	pr_vdebug("gs_write: ttyGS%d (%p) writing %zu bytes\n",
 			port->port_num, tty, count);
 
 	spin_lock_irqsave(&port->port_lock, flags);
@@ -759,7 +752,7 @@ static int gs_write(struct tty_struct *tty, const unsigned char *buf, int count)
 	return count;
 }
 
-static int gs_put_char(struct tty_struct *tty, unsigned char ch)
+static int gs_put_char(struct tty_struct *tty, u8 ch)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
@@ -1087,7 +1080,7 @@ ssize_t gserial_set_console(unsigned char port_num, const char *page, size_t cou
 	bool enable;
 	int ret;
 
-	ret = strtobool(page, &enable);
+	ret = kstrtobool(page, &enable);
 	if (ret)
 		return ret;
 

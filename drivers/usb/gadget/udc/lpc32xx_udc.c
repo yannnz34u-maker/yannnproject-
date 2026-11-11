@@ -3203,6 +3203,7 @@ static int lpc32xx_udc_remove(struct platform_device *pdev)
 	clk_disable_unprepare(udc->usb_slv_clk);
 
 	put_device(&udc->isp1301_i2c_client->dev);
+
 	return 0;
 }
 

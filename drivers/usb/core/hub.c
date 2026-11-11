@@ -35,6 +35,7 @@
 #include <linux/bitfield.h>
 #include <linux/uaccess.h>
 #include <asm/byteorder.h>
+#include <trace/hooks/usb.h>
 
 #include "hub.h"
 #include "otg_productlist.h"
@@ -2203,22 +2204,6 @@ EXPORT_SYMBOL_GPL(usb_set_device_state);
  * USB-3.0 buses the address is assigned by the controller hardware
  * and it usually is not the same as the device number.
  *
- * WUSB devices are simple: they have no hubs behind, so the mapping
- * device <-> virtual port number becomes 1:1. Why? to simplify the
- * life of the device connection logic in
- * drivers/usb/wusbcore/devconnect.c. When we do the initial secret
- * handshake we need to assign a temporary address in the unauthorized
- * space. For simplicity we use the first virtual port number found to
- * be free [drivers/usb/wusbcore/devconnect.c:wusbhc_devconnect_ack()]
- * and that becomes it's address [X < 128] or its unauthorized address
- * [X | 0x80].
- *
- * We add 1 as an offset to the one-based USB-stack port number
- * (zero-based wusb virtual port index) for two reasons: (a) dev addr
- * 0 is reserved by USB for default address; (b) Linux's USB stack
- * uses always #1 for the root hub of the controller. So USB stack's
- * port #1, which is wusb virtual-port #0 has address #2.
- *
  * Devices connected under xHCI are not as simple.  The host controller
  * supports virtualization, so the hardware assigns device addresses and
  * the HCD must setup data structures before issuing a set address
@@ -2231,19 +2216,13 @@ static void choose_devnum(struct usb_device *udev)
 
 	/* be safe when more hub events are proceed in parallel */
 	mutex_lock(&bus->devnum_next_mutex);
-	if (udev->wusb) {
-		devnum = udev->portnum + 1;
-		BUG_ON(test_bit(devnum, bus->devmap.devicemap));
-	} else {
-		/* Try to allocate the next devnum beginning at
-		 * bus->devnum_next. */
-		devnum = find_next_zero_bit(bus->devmap.devicemap, 128,
-					    bus->devnum_next);
-		if (devnum >= 128)
-			devnum = find_next_zero_bit(bus->devmap.devicemap,
-						    128, 1);
-		bus->devnum_next = (devnum >= 127 ? 1 : devnum + 1);
-	}
+
+	/* Try to allocate the next devnum beginning at bus->devnum_next. */
+	devnum = find_next_zero_bit(bus->devmap.devicemap, 128,
+			bus->devnum_next);
+	if (devnum >= 128)
+		devnum = find_next_zero_bit(bus->devmap.devicemap, 128, 1);
+	bus->devnum_next = (devnum >= 127 ? 1 : devnum + 1);
 	if (devnum < 128) {
 		set_bit(devnum, bus->devmap.devicemap);
 		udev->devnum = devnum;
@@ -2261,9 +2240,7 @@ static void release_devnum(struct usb_device *udev)
 
 static void update_devnum(struct usb_device *udev, int devnum)
 {
-	/* The address for a WUSB device is managed by wusbcore. */
-	if (!udev->wusb)
-		udev->devnum = devnum;
+	udev->devnum = devnum;
 	if (!udev->devaddr)
 		udev->devaddr = (u8)devnum;
 }
@@ -2657,6 +2634,11 @@ int usb_new_device(struct usb_device *udev)
 	dev_dbg(&udev->dev, "udev %d, busnum %d, minor = %d\n",
 			udev->devnum, udev->bus->busnum,
 			(((udev->bus->busnum-1) * 128) + (udev->devnum-1)));
+
+	trace_android_vh_usb_new_device_added(udev, &err);
+	if (err)
+		goto fail;
+
 	/* export the usbdev device-node for libusb */
 	udev->dev.devt = MKDEV(USB_DEVICE_MAJOR,
 			(((udev->bus->busnum-1) * 128) + (udev->devnum-1)));
@@ -2766,20 +2748,6 @@ int usb_authorize_device(struct usb_device *usb_dev)
 		goto error_autoresume;
 	}
 
-	if (usb_dev->wusb) {
-		struct usb_device_descriptor *descr;
-
-		descr = usb_get_device_descriptor(usb_dev);
-		if (IS_ERR(descr)) {
-			result = PTR_ERR(descr);
-			dev_err(&usb_dev->dev, "can't re-read device descriptor for "
-				"authorization: %d\n", result);
-			goto error_device_descriptor;
-		}
-		usb_dev->descriptor = *descr;
-		kfree(descr);
-	}
-
 	usb_dev->authorized = 1;
 	/* Choose and set the configuration.  This registers the interfaces
 	 * with the driver core and lets interface drivers bind to them.
@@ -2796,7 +2764,6 @@ int usb_authorize_device(struct usb_device *usb_dev)
 	}
 	dev_info(&usb_dev->dev, "authorized to connect\n");
 
-error_device_descriptor:
 	usb_autosuspend_device(usb_dev);
 error_autoresume:
 out_authorized:
@@ -2882,17 +2849,6 @@ static enum usb_ssp_rate get_port_ssp_rate(struct usb_device *hdev,
 out:
 	return USB_SSP_GEN_UNKNOWN;
 }
-
-/* Returns 1 if @hub is a WUSB root hub, 0 otherwise */
-static unsigned hub_is_wusb(struct usb_hub *hub)
-{
-	struct usb_hcd *hcd;
-	if (hub->hdev->parent != NULL)  /* not a root hub? */
-		return 0;
-	hcd = bus_to_hcd(hub->hdev->bus);
-	return hcd->wireless;
-}
-
 
 #ifdef CONFIG_USB_FEW_INIT_RETRIES
 #define PORT_RESET_TRIES	2
@@ -3046,9 +3002,7 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 		udev->tx_lanes = 1;
 		udev->ssp_rate = USB_SSP_GEN_UNKNOWN;
 	}
-	if (hub_is_wusb(hub))
-		udev->speed = USB_SPEED_WIRELESS;
-	else if (udev->ssp_rate != USB_SSP_GEN_UNKNOWN)
+	if (udev->ssp_rate != USB_SSP_GEN_UNKNOWN)
 		udev->speed = USB_SPEED_SUPER_PLUS;
 	else if (hub_is_superspeed(hub->hdev))
 		udev->speed = USB_SPEED_SUPER;
@@ -4779,7 +4733,7 @@ static int hub_set_address(struct usb_device *udev, int devnum)
 	if (udev->state != USB_STATE_DEFAULT)
 		return -EINVAL;
 	if (hcd->driver->address_device)
-		retval = hcd->driver->address_device(hcd, udev);
+		retval = hcd->driver->address_device(hcd, udev, timeout_ms);
 	else
 		retval = usb_control_msg(udev, usb_sndaddr0pipe(),
 				USB_REQ_SET_ADDRESS, 0, devnum, 0,
@@ -4968,13 +4922,10 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
 	if (initial) {
 		/* USB 2.0 section 5.5.3 talks about ep0 maxpacket ...
 		 * it's fixed size except for full speed devices.
-		 * For Wireless USB devices, ep0 max packet is always 512 (tho
-		 * reported as 0xff in the device descriptor). WUSB1.0[4.8.1].
 		 */
 		switch (udev->speed) {
 		case USB_SPEED_SUPER_PLUS:
 		case USB_SPEED_SUPER:
-		case USB_SPEED_WIRELESS:	/* fixed at 512 */
 			udev->ep0.desc.wMaxPacketSize = cpu_to_le16(512);
 			break;
 		case USB_SPEED_HIGH:		/* fixed at 64 */
@@ -4995,10 +4946,7 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
 		}
 	}
 
-	if (udev->speed == USB_SPEED_WIRELESS)
-		speed = "variable speed Wireless";
-	else
-		speed = usb_speed_string(udev->speed);
+	speed = usb_speed_string(udev->speed);
 
 	/*
 	 * The controller driver may be NULL if the controller device
@@ -5091,50 +5039,44 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
 			}
 		}
 
-		/*
-		 * If device is WUSB, we already assigned an
-		 * unauthorized address in the Connect Ack sequence;
-		 * authorization will assign the final address.
-		 */
-		if (udev->wusb == 0) {
-			for (operations = 0; operations < SET_ADDRESS_TRIES; ++operations) {
-				retval = hub_set_address(udev, devnum);
-				if (retval >= 0)
-					break;
-				msleep(200);
-			}
-			if (retval < 0) {
-				if (retval != -ENODEV)
-					dev_err(&udev->dev, "device not accepting address %d, error %d\n",
-							devnum, retval);
-				goto fail;
-			}
-			if (udev->speed >= USB_SPEED_SUPER) {
-				devnum = udev->devnum;
-				dev_info(&udev->dev,
-						"%s SuperSpeed%s%s USB device number %d using %s\n",
-						(udev->config) ? "reset" : "new",
-					 (udev->speed == USB_SPEED_SUPER_PLUS) ?
-							" Plus" : "",
-					 (udev->ssp_rate == USB_SSP_GEN_2x2) ?
-							" Gen 2x2" :
-					 (udev->ssp_rate == USB_SSP_GEN_2x1) ?
-							" Gen 2x1" :
-					 (udev->ssp_rate == USB_SSP_GEN_1x2) ?
-							" Gen 1x2" : "",
-					 devnum, driver_name);
-			}
-
-			/* cope with hardware quirkiness:
-			 *  - let SET_ADDRESS settle, some device hardware wants it
-			 *  - read ep0 maxpacket even for high and low speed,
-			 */
-			msleep(10);
-			if (do_new_scheme)
+		for (operations = 0; operations < SET_ADDRESS_TRIES; ++operations) {
+			retval = hub_set_address(udev, devnum);
+			if (retval >= 0)
 				break;
+			msleep(200);
+		}
+		if (retval < 0) {
+			if (retval != -ENODEV)
+				dev_err(&udev->dev, "device not accepting address %d, error %d\n",
+						devnum, retval);
+			goto fail;
+		}
+		if (udev->speed >= USB_SPEED_SUPER) {
+			devnum = udev->devnum;
+			dev_info(&udev->dev,
+					"%s SuperSpeed%s%s USB device number %d using %s\n",
+					(udev->config) ? "reset" : "new",
+				 (udev->speed == USB_SPEED_SUPER_PLUS) ?
+						" Plus" : "",
+				 (udev->ssp_rate == USB_SSP_GEN_2x2) ?
+						" Gen 2x2" :
+				 (udev->ssp_rate == USB_SSP_GEN_2x1) ?
+						" Gen 2x1" :
+				 (udev->ssp_rate == USB_SSP_GEN_1x2) ?
+						" Gen 1x2" : "",
+				 devnum, driver_name);
 		}
 
-		/* !do_new_scheme || wusb */
+		/*
+		 * cope with hardware quirkiness:
+		 *  - let SET_ADDRESS settle, some device hardware wants it
+		 *  - read ep0 maxpacket even for high and low speed,
+		 */
+		msleep(10);
+
+		if (do_new_scheme)
+			break;
+
 		maxp0 = get_bMaxPacketSize0(udev, buf, 8, retries == 0);
 		if (maxp0 < 0) {
 			retval = maxp0;
@@ -5229,7 +5171,7 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
 
 	usb_detect_quirks(udev);
 
-	if (udev->wusb == 0 && le16_to_cpu(udev->descriptor.bcdUSB) >= 0x0201) {
+	if (le16_to_cpu(udev->descriptor.bcdUSB) >= 0x0201) {
 		retval = usb_get_bos_descriptor(udev);
 		if (!retval) {
 			udev->lpm_capable = usb_device_supports_lpm(udev);
@@ -5505,7 +5447,6 @@ static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
 		usb_set_device_state(udev, USB_STATE_POWERED);
 		udev->bus_mA = hub->mA_per_port;
 		udev->level = hdev->level + 1;
-		udev->wusb = hub_is_wusb(hub);
 
 		/* Devices connected to SuperSpeed hubs are USB 3.0 or later */
 		if (hub_is_superspeed(hub->hdev))

@@ -36,7 +36,8 @@ INDIRECT_CALLABLE_SCOPE int tcp6_gro_complete(struct sk_buff *skb, int thoff)
 				  &iph->daddr, 0);
 	skb_shinfo(skb)->gso_type |= SKB_GSO_TCPV6;
 
-	return tcp_gro_complete(skb);
+	tcp_gro_complete(skb);
+	return 0;
 }
 
 static void __tcpv6_gso_segment_csum(struct sk_buff *seg,

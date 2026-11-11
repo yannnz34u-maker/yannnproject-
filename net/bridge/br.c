@@ -171,13 +171,14 @@ static int br_switchdev_event(struct notifier_block *unused,
 	case SWITCHDEV_FDB_ADD_TO_BRIDGE:
 		fdb_info = ptr;
 		err = br_fdb_external_learn_add(br, p, fdb_info->addr,
-						fdb_info->vid, false);
+						fdb_info->vid,
+						fdb_info->locked, false);
 		if (err) {
 			err = notifier_from_errno(err);
 			break;
 		}
 		br_fdb_offloaded_set(br, p, fdb_info->addr,
-				     fdb_info->vid, true);
+				     fdb_info->vid, fdb_info->offloaded);
 		break;
 	case SWITCHDEV_FDB_DEL_TO_BRIDGE:
 		fdb_info = ptr;
@@ -237,6 +238,14 @@ static int br_switchdev_blocking_event(struct notifier_block *nb,
 
 		br_switchdev_port_unoffload(p, b->ctx, b->atomic_nb,
 					    b->blocking_nb);
+		break;
+	case SWITCHDEV_BRPORT_REPLAY:
+		brport_info = ptr;
+		b = &brport_info->brport;
+
+		err = br_switchdev_port_replay(p, b->dev, b->ctx, b->atomic_nb,
+					       b->blocking_nb, extack);
+		err = notifier_from_errno(err);
 		break;
 	}
 
@@ -307,6 +316,13 @@ int br_boolopt_multi_toggle(struct net_bridge *br,
 	unsigned long bitmap = bm->optmask;
 	int err = 0;
 	int opt_id;
+
+	opt_id = find_next_bit(&bitmap, BITS_PER_LONG, BR_BOOLOPT_MAX);
+	if (opt_id != BITS_PER_LONG) {
+		NL_SET_ERR_MSG_FMT_MOD(extack, "Unknown boolean option %d",
+				       opt_id);
+		return -EINVAL;
+	}
 
 	for_each_set_bit(opt_id, &bitmap, BR_BOOLOPT_MAX) {
 		bool on = !!(bm->optval & BIT(opt_id));

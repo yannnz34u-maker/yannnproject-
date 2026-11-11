@@ -201,6 +201,7 @@ static __always_inline bool str_has_suffix(const char *str, const char *suffix)
 	return !strncmp(str + str_len - suffix_len, suffix, suffix_len);
 }
 
+#ifdef CONFIG_PER_VMA_LOCK
 /*
  * The dynamic linker, or interpreter, operates within the process context
  * of the binary that necessitated dynamic linking.
@@ -214,8 +215,6 @@ static __always_inline bool str_has_suffix(const char *str, const char *suffix)
  * VMAs of the current task.
  *
  * Returns true if in linker context, otherwise false.
- *
- * Caller must hold mmap lock in read mode.
  */
 static inline bool linker_ctx(void)
 {
@@ -224,17 +223,33 @@ static inline bool linker_ctx(void)
 	struct vm_area_struct *vma;
 	struct file *file;
 
-	if (!regs)
+	/*
+	 * Called from madvise_dontneed_single_vma() with the target VMA
+	 * read-locked (MADVISE_VMA_READ_LOCK).  We MUST NOT take mmap_lock
+	 * here: that inverts the mmap_lock -> per-VMA-lock order and ABBA-
+	 * deadlocks against a concurrent vma_start_write() on the target
+	 * may occur.
+	 *
+	 * io_wq workers / kthreads have zeroed pt_regs (pc==0) and are never
+	 * the dynamic linker, so reject them up front instead of falling back
+	 * to mmap_read_lock().
+	 */
+	if (!regs || current->flags & (PF_IO_WORKER | PF_KTHREAD) ||
+	    !user_mode(regs))
 		return false;
 
-	vma = find_vma(mm, instruction_pointer(regs));
+	vma = lock_vma_under_rcu(mm, instruction_pointer(regs));
 
-	/* Current execution context, the VMA must be present */
-	BUG_ON(!vma);
+	/*
+	 * Conservatively reject; only affects /proc/<pid>/[s]maps emulated
+	 * output.
+	 */
+	if (!vma)
+		return false;
 
 	file = vma->vm_file;
 	if (!file)
-		return false;
+		goto out;
 
 	if ((vma->vm_flags & VM_EXEC)) {
 		char buf[64];
@@ -246,7 +261,7 @@ static inline bool linker_ctx(void)
 
 		if (IS_ERR(path)) {
 			pgmigration_err("Unable to parse filepath");
-			return false;
+			goto out;
 		}
 
 		/*
@@ -260,13 +275,21 @@ static inline bool linker_ctx(void)
 		 */
 		if (!strcmp(path, "/system/bin/bootstrap/linker64") ||
 		    !strcmp(path, "/system/bin/linker64") ||
-		    !strcmp(path, "/apex/com.android.runtime/bin/linker64"))
+		    !strcmp(path, "/apex/com.android.runtime/bin/linker64")) {
+			vma_end_read(vma);
 			return true;
+		}
 	}
-
+out:
+	vma_end_read(vma);
 	return false;
 }
 
+#else /* CONFIG_PER_VMA_LOCK */
+
+static inline bool linker_ctx(void) { return false; }
+
+#endif /* CONFIG_PER_VMA_LOCK */
 /*
  * Saves the number of padding pages for an ELF segment mapping
  * in vm_flags.

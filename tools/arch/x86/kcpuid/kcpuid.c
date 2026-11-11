@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 #define _GNU_SOURCE
 
-#include <stdio.h>
+#include <err.h>
+#include <getopt.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <getopt.h>
 
 #define ARRAY_SIZE(x)	(sizeof(x) / sizeof((x)[0]))
 #define min(a, b)	(((a) < (b)) ? (a) : (b))
@@ -34,12 +35,16 @@ struct reg_desc {
 	struct bits_desc descs[32];
 };
 
-enum {
+enum cpuid_reg {
 	R_EAX = 0,
 	R_EBX,
 	R_ECX,
 	R_EDX,
 	NR_REGS
+};
+
+static const char * const reg_names[] = {
+	"EAX", "EBX", "ECX", "EDX",
 };
 
 struct subleaf {
@@ -152,14 +157,14 @@ static bool cpuid_store(struct cpuid_range *range, u32 f, int subleaf,
 	if (!func->leafs) {
 		func->leafs = malloc(sizeof(struct subleaf));
 		if (!func->leafs)
-			perror("malloc func leaf");
+			err(EXIT_FAILURE, NULL);
 
 		func->nr = 1;
 	} else {
 		s = func->nr;
 		func->leafs = realloc(func->leafs, (s + 1) * sizeof(*leaf));
 		if (!func->leafs)
-			perror("realloc f->leafs");
+			err(EXIT_FAILURE, NULL);
 
 		func->nr++;
 	}
@@ -218,7 +223,7 @@ struct cpuid_range *setup_cpuid_range(u32 input_eax)
 
 	range = malloc(sizeof(struct cpuid_range));
 	if (!range)
-		perror("malloc range");
+		err(EXIT_FAILURE, NULL);
 
 	if (input_eax & 0x80000000)
 		range->is_ext = true;
@@ -227,7 +232,7 @@ struct cpuid_range *setup_cpuid_range(u32 input_eax)
 
 	range->funcs = malloc(sizeof(struct cpuid_func) * idx_func);
 	if (!range->funcs)
-		perror("malloc range->funcs");
+		err(EXIT_FAILURE, NULL);
 
 	range->nr = idx_func;
 	memset(range->funcs, 0, sizeof(struct cpuid_func) * idx_func);
@@ -383,8 +388,8 @@ static int parse_line(char *line)
 	return 0;
 
 err_exit:
-	printf("Warning: wrong line format:\n");
-	printf("\tline[%d]: %s\n", flines, line);
+	warnx("Wrong line format:\n"
+	      "\tline[%d]: %s", flines, line);
 	return -1;
 }
 
@@ -406,10 +411,8 @@ static void parse_text(void)
 		file = fopen("./cpuid.csv", "r");
 	}
 
-	if (!file) {
-		printf("Fail to open '%s'\n", filename);
-		return;
-	}
+	if (!file)
+		err(EXIT_FAILURE, "%s", filename);
 
 	while (1) {
 		ret = getline(&line, &len, file);
@@ -426,11 +429,17 @@ static void parse_text(void)
 
 
 /* Decode every eax/ebx/ecx/edx */
-static void decode_bits(u32 value, struct reg_desc *rdesc)
+static void decode_bits(u32 value, struct reg_desc *rdesc, enum cpuid_reg reg)
 {
 	struct bits_desc *bdesc;
 	int start, end, i;
 	u32 mask;
+
+	if (!rdesc->nr) {
+		if (show_details)
+			printf("\t %s: 0x%08x\n", reg_names[reg], value);
+		return;
+	}
 
 	for (i = 0; i < rdesc->nr; i++) {
 		bdesc = &rdesc->descs[i];
@@ -466,13 +475,21 @@ static void show_leaf(struct subleaf *leaf)
 	if (!leaf)
 		return;
 
-	if (show_raw)
+	if (show_raw) {
 		leaf_print_raw(leaf);
+	} else {
+		if (show_details)
+			printf("CPUID_0x%x_ECX[0x%x]:\n",
+				leaf->index, leaf->sub);
+	}
 
-	decode_bits(leaf->eax, &leaf->info[R_EAX]);
-	decode_bits(leaf->ebx, &leaf->info[R_EBX]);
-	decode_bits(leaf->ecx, &leaf->info[R_ECX]);
-	decode_bits(leaf->edx, &leaf->info[R_EDX]);
+	decode_bits(leaf->eax, &leaf->info[R_EAX], R_EAX);
+	decode_bits(leaf->ebx, &leaf->info[R_EBX], R_EBX);
+	decode_bits(leaf->ecx, &leaf->info[R_ECX], R_ECX);
+	decode_bits(leaf->edx, &leaf->info[R_EDX], R_EDX);
+
+	if (!show_raw && show_details)
+		printf("\n");
 }
 
 static void show_func(struct cpuid_func *func)
@@ -497,15 +514,16 @@ static void show_range(struct cpuid_range *range)
 static inline struct cpuid_func *index_to_func(u32 index)
 {
 	struct cpuid_range *range;
+	u32 func_idx;
 
 	range = (index & 0x80000000) ? leafs_ext : leafs_basic;
-	index &= 0x7FFFFFFF;
+	func_idx = index & 0xffff;
 
-	if (((index & 0xFFFF) + 1) > (u32)range->nr) {
-		printf("ERR: invalid input index (0x%x)\n", index);
+	if ((func_idx + 1) > (u32)range->nr) {
+		warnx("Invalid input index (0x%x)", index);
 		return NULL;
 	}
-	return &range->funcs[index];
+	return &range->funcs[func_idx];
 }
 
 static void show_info(void)
@@ -534,7 +552,7 @@ static void show_info(void)
 				return;
 			}
 
-			printf("ERR: invalid input subleaf (0x%x)\n", user_sub);
+			warnx("Invalid input subleaf (0x%x)", user_sub);
 		}
 
 		show_func(func);
@@ -565,15 +583,15 @@ static void setup_platform_cpuid(void)
 
 static void usage(void)
 {
-	printf("kcpuid [-abdfhr] [-l leaf] [-s subleaf]\n"
-		"\t-a|--all             Show both bit flags and complex bit fields info\n"
-		"\t-b|--bitflags        Show boolean flags only\n"
-		"\t-d|--detail          Show details of the flag/fields (default)\n"
-		"\t-f|--flags           Specify the cpuid csv file\n"
-		"\t-h|--help            Show usage info\n"
-		"\t-l|--leaf=index      Specify the leaf you want to check\n"
-		"\t-r|--raw             Show raw cpuid data\n"
-		"\t-s|--subleaf=sub     Specify the subleaf you want to check\n"
+	warnx("kcpuid [-abdfhr] [-l leaf] [-s subleaf]\n"
+	      "\t-a|--all             Show both bit flags and complex bit fields info\n"
+	      "\t-b|--bitflags        Show boolean flags only\n"
+	      "\t-d|--detail          Show details of the flag/fields (default)\n"
+	      "\t-f|--flags           Specify the CPUID CSV file\n"
+	      "\t-h|--help            Show usage info\n"
+	      "\t-l|--leaf=index      Specify the leaf you want to check\n"
+	      "\t-r|--raw             Show raw CPUID data\n"
+	      "\t-s|--subleaf=sub     Specify the subleaf you want to check"
 	);
 }
 
@@ -624,7 +642,7 @@ static int parse_options(int argc, char *argv[])
 			user_sub = strtoul(optarg, NULL, 0);
 			break;
 		default:
-			printf("%s: Invalid option '%c'\n", argv[0], optopt);
+			warnx("Invalid option '%c'", optopt);
 			return -1;
 	}
 

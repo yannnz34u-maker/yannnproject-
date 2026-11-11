@@ -362,7 +362,7 @@ static struct i2c_driver ptn5150_i2c_driver = {
 		.pm = pm_sleep_ptr(&ptn5150_pm_ops),
 		.of_match_table = ptn5150_dt_match,
 	},
-	.probe_new	= ptn5150_i2c_probe,
+	.probe		= ptn5150_i2c_probe,
 	.id_table = ptn5150_i2c_id,
 };
 module_i2c_driver(ptn5150_i2c_driver);

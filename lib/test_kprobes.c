@@ -12,8 +12,15 @@
 
 #define div_factor 3
 
+#define KP_CLEAR(_kp) \
+do { \
+	(_kp).addr = NULL; \
+	(_kp).flags = 0; \
+} while (0)
+
 static u32 rand1, preh_val, posth_val;
 static u32 (*target)(u32 value);
+static u32 (*recursed_target)(u32 value);
 static u32 (*target2)(u32 value);
 static struct kunit *current_test;
 
@@ -27,18 +34,27 @@ static noinline u32 kprobe_target(u32 value)
 	return (value / div_factor);
 }
 
+static noinline u32 kprobe_recursed_target(u32 value)
+{
+	return (value / div_factor);
+}
+
 static int kp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
 	KUNIT_EXPECT_FALSE(current_test, preemptible());
-	preh_val = (rand1 / div_factor);
+
+	preh_val = recursed_target(rand1);
 	return 0;
 }
 
 static void kp_post_handler(struct kprobe *p, struct pt_regs *regs,
 		unsigned long flags)
 {
+	u32 expval = recursed_target(rand1);
+
 	KUNIT_EXPECT_FALSE(current_test, preemptible());
-	KUNIT_EXPECT_EQ(current_test, preh_val, (rand1 / div_factor));
+	KUNIT_EXPECT_EQ(current_test, preh_val, expval);
+
 	posth_val = preh_val + div_factor;
 }
 
@@ -115,10 +131,6 @@ static void test_kprobes(struct kunit *test)
 
 	current_test = test;
 
-	/* addr and flags should be cleard for reusing kprobe. */
-	kp.addr = NULL;
-	kp.flags = 0;
-
 	KUNIT_EXPECT_EQ(test, 0, register_kprobes(kps, 2));
 	preh_val = 0;
 	posth_val = 0;
@@ -134,6 +146,29 @@ static void test_kprobes(struct kunit *test)
 	KUNIT_EXPECT_NE(test, 0, preh_val);
 	KUNIT_EXPECT_NE(test, 0, posth_val);
 	unregister_kprobes(kps, 2);
+}
+
+static struct kprobe kp_missed = {
+	.symbol_name = "kprobe_recursed_target",
+	.pre_handler = kp_pre_handler,
+	.post_handler = kp_post_handler,
+};
+
+static void test_kprobe_missed(struct kunit *test)
+{
+	current_test = test;
+	preh_val = 0;
+	posth_val = 0;
+
+	KUNIT_EXPECT_EQ(test, 0, register_kprobe(&kp_missed));
+
+	recursed_target(rand1);
+
+	KUNIT_EXPECT_EQ(test, 2, kp_missed.nmissed);
+	KUNIT_EXPECT_NE(test, 0, preh_val);
+	KUNIT_EXPECT_NE(test, 0, posth_val);
+
+	unregister_kprobe(&kp_missed);
 }
 
 #ifdef CONFIG_KRETPROBES
@@ -193,9 +228,6 @@ static void test_kretprobes(struct kunit *test)
 	struct kretprobe *rps[2] = {&rp, &rp2};
 
 	current_test = test;
-	/* addr and flags should be cleard for reusing kprobe. */
-	rp.kp.addr = NULL;
-	rp.kp.flags = 0;
 	KUNIT_EXPECT_EQ(test, 0, register_kretprobes(rps, 2));
 
 	krph_val = 0;
@@ -257,8 +289,6 @@ static void test_stacktrace_on_kretprobe(struct kunit *test)
 	unsigned long myretaddr = (unsigned long)__builtin_return_address(0);
 
 	current_test = test;
-	rp3.kp.addr = NULL;
-	rp3.kp.flags = 0;
 
 	/*
 	 * Run the stacktrace_driver() to record correct return address in
@@ -319,8 +349,6 @@ static void test_stacktrace_on_nested_kretprobe(struct kunit *test)
 	struct kretprobe *rps[2] = {&rp3, &rp4};
 
 	current_test = test;
-	rp3.kp.addr = NULL;
-	rp3.kp.flags = 0;
 
 	//KUNIT_ASSERT_NE(test, myretaddr, stacktrace_driver());
 
@@ -334,21 +362,32 @@ static void test_stacktrace_on_nested_kretprobe(struct kunit *test)
 
 static int kprobes_test_init(struct kunit *test)
 {
+	KP_CLEAR(kp);
+	KP_CLEAR(kp2);
+	KP_CLEAR(kp_missed);
+#ifdef CONFIG_KRETPROBES
+	KP_CLEAR(rp.kp);
+	KP_CLEAR(rp2.kp);
+#ifdef CONFIG_ARCH_CORRECT_STACKTRACE_ON_KRETPROBE
+	KP_CLEAR(rp3.kp);
+	KP_CLEAR(rp4.kp);
+#endif
+#endif
+
 	target = kprobe_target;
 	target2 = kprobe_target2;
+	recursed_target = kprobe_recursed_target;
 	stacktrace_target = kprobe_stacktrace_target;
 	internal_target = kprobe_stacktrace_internal_target;
 	stacktrace_driver = kprobe_stacktrace_driver;
-
-	do {
-		rand1 = get_random_u32();
-	} while (rand1 <= div_factor);
+	rand1 = get_random_u32_above(div_factor);
 	return 0;
 }
 
 static struct kunit_case kprobes_testcases[] = {
 	KUNIT_CASE(test_kprobe),
 	KUNIT_CASE(test_kprobes),
+	KUNIT_CASE(test_kprobe_missed),
 #ifdef CONFIG_KRETPROBES
 	KUNIT_CASE(test_kretprobe),
 	KUNIT_CASE(test_kretprobes),

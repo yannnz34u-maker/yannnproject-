@@ -513,9 +513,9 @@ static void debug_print_object(struct debug_obj *obj, char *msg)
 			descr->debug_hint(obj->object) : NULL;
 		limit++;
 		WARN(1, KERN_ERR "ODEBUG: %s %s (active state %u) "
-				 "object type: %s hint: %pS\n",
+				 "object: %p object type: %s hint: %pS\n",
 			msg, obj_states[obj->state], obj->astate,
-			descr->name, hint);
+			obj->object, descr->name, hint);
 	}
 	debug_objects_warnings++;
 }
@@ -597,59 +597,21 @@ static struct debug_obj *lookup_object_or_alloc(void *addr, struct debug_bucket 
 	return NULL;
 }
 
-static inline bool debug_objects_is_pi_blocked_on(void)
-{
-#ifdef CONFIG_RT_MUTEXES
-	return current->pi_blocked_on != NULL;
-#else
-	return false;
-#endif
-}
-
-static inline bool can_fill_pool(void)
-{
-	/*
-	 * On !RT enabled kernels there are no restrictions and spinlock_t and
-	 * raw_spinlock_t are the same types.
-	 */
-	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
-		return true;
-
-	/*
-	 * On RT enabled kernels, the task must not be blocked on a lock as
-	 * that could corrupt the PI state when blocking on a lock in the
-	 * allocation path.
-	 */
-	if (debug_objects_is_pi_blocked_on())
-		return false;
-
-	/*
-	 * On RT enabled kernels the pool refill should happen in preemptible
-	 * context.
-	 */
-	if (preemptible())
-		return true;
-
-	/*
-	 * Though during system boot before scheduling is set up, preemption is
-	 * disabled and the pool can get exhausted. Before scheduling is active
-	 * a task cannot be blocked on a sleeping lock, but it might hold a lock
-	 * and if interrupted then hard interrupt context might run into a lock
-	 * inversion. So exclude hard interrupt context from allocations before
-	 * scheduling is active.
-	 */
-	return system_state < SYSTEM_SCHEDULING && !in_hardirq();
-}
-
 static void debug_objects_fill_pool(void)
 {
-	if (can_fill_pool()) {
+	/*
+	 * On RT enabled kernels the pool refill must happen in preemptible
+	 * context -- for !RT kernels we rely on the fact that spinlock_t and
+	 * raw_spinlock_t are basically the same type and this lock-type
+	 * inversion works just fine.
+	 */
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT) || preemptible()) {
 		/*
 		 * Annotate away the spinlock_t inside raw_spinlock_t warning
-		 * by temporarily raising the wait-type to LD_WAIT_CONFIG, matching
-		 * the preemptible() condition in can_fill_pool().
+		 * by temporarily raising the wait-type to WAIT_SLEEP, matching
+		 * the preemptible() condition above.
 		 */
-		static DEFINE_WAIT_OVERRIDE_MAP(fill_pool_map, LD_WAIT_CONFIG);
+		static DEFINE_WAIT_OVERRIDE_MAP(fill_pool_map, LD_WAIT_SLEEP);
 		lock_map_acquire_try(&fill_pool_map);
 		fill_pool();
 		lock_map_release(&fill_pool_map);

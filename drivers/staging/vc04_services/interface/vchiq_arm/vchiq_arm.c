@@ -144,9 +144,9 @@ static char *g_fragments_base;
 static char *g_free_fragments;
 static struct semaphore g_free_fragments_sema;
 
-static DEFINE_SEMAPHORE(g_free_fragments_mutex);
+static DEFINE_SEMAPHORE(g_free_fragments_mutex, 1);
 
-static enum vchiq_status
+static int
 vchiq_blocking_bulk_transfer(struct vchiq_instance *instance, unsigned int handle, void *data,
 			     unsigned int size, enum vchiq_bulk_dir dir);
 
@@ -536,9 +536,15 @@ static int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state 
 	channelbase = slot_phys;
 	err = rpi_firmware_property(fw, RPI_FIRMWARE_VCHIQ_INIT,
 				    &channelbase, sizeof(channelbase));
-	if (err || channelbase) {
-		dev_err(dev, "failed to set channelbase\n");
-		return err ? : -ENXIO;
+	if (err) {
+		dev_err(dev, "failed to send firmware property: %d\n", err);
+		return err;
+	}
+
+	if (channelbase) {
+		dev_err(dev, "failed to set channelbase (response: %x)\n",
+			channelbase);
+		return -ENXIO;
 	}
 
 	vchiq_log_info(vchiq_arm_log_level, "vchiq_init - done (slots %pK, phys %pad)",
@@ -709,7 +715,7 @@ void free_bulk_waiter(struct vchiq_instance *instance)
 	}
 }
 
-enum vchiq_status vchiq_shutdown(struct vchiq_instance *instance)
+int vchiq_shutdown(struct vchiq_instance *instance)
 {
 	int status = 0;
 	struct vchiq_state *state = instance->state;
@@ -735,9 +741,9 @@ static int vchiq_is_connected(struct vchiq_instance *instance)
 	return instance->connected;
 }
 
-enum vchiq_status vchiq_connect(struct vchiq_instance *instance)
+int vchiq_connect(struct vchiq_instance *instance)
 {
-	enum vchiq_status status;
+	int status;
 	struct vchiq_state *state = instance->state;
 
 	if (mutex_lock_killable(&state->mutex)) {
@@ -759,12 +765,12 @@ failed:
 }
 EXPORT_SYMBOL(vchiq_connect);
 
-static enum vchiq_status
+static int
 vchiq_add_service(struct vchiq_instance *instance,
 		  const struct vchiq_service_params_kernel *params,
 		  unsigned int *phandle)
 {
-	enum vchiq_status status;
+	int status;
 	struct vchiq_state *state = instance->state;
 	struct vchiq_service *service = NULL;
 	int srvstate;
@@ -789,7 +795,7 @@ vchiq_add_service(struct vchiq_instance *instance,
 	return status;
 }
 
-enum vchiq_status
+int
 vchiq_open_service(struct vchiq_instance *instance,
 		   const struct vchiq_service_params_kernel *params,
 		   unsigned int *phandle)
@@ -821,11 +827,11 @@ failed:
 }
 EXPORT_SYMBOL(vchiq_open_service);
 
-enum vchiq_status
+int
 vchiq_bulk_transmit(struct vchiq_instance *instance, unsigned int handle, const void *data,
 		    unsigned int size, void *userdata, enum vchiq_bulk_mode mode)
 {
-	enum vchiq_status status;
+	int status;
 
 	while (1) {
 		switch (mode) {
@@ -859,11 +865,11 @@ vchiq_bulk_transmit(struct vchiq_instance *instance, unsigned int handle, const 
 }
 EXPORT_SYMBOL(vchiq_bulk_transmit);
 
-enum vchiq_status vchiq_bulk_receive(struct vchiq_instance *instance, unsigned int handle,
-				     void *data, unsigned int size, void *userdata,
-				     enum vchiq_bulk_mode mode)
+int vchiq_bulk_receive(struct vchiq_instance *instance, unsigned int handle,
+		       void *data, unsigned int size, void *userdata,
+		       enum vchiq_bulk_mode mode)
 {
-	enum vchiq_status status;
+	int status;
 
 	while (1) {
 		switch (mode) {
@@ -896,12 +902,12 @@ enum vchiq_status vchiq_bulk_receive(struct vchiq_instance *instance, unsigned i
 }
 EXPORT_SYMBOL(vchiq_bulk_receive);
 
-static enum vchiq_status
+static int
 vchiq_blocking_bulk_transfer(struct vchiq_instance *instance, unsigned int handle, void *data,
 			     unsigned int size, enum vchiq_bulk_dir dir)
 {
 	struct vchiq_service *service;
-	enum vchiq_status status;
+	int status;
 	struct bulk_waiter_node *waiter = NULL, *iter;
 
 	service = find_service_by_handle(instance, handle);
@@ -969,7 +975,7 @@ vchiq_blocking_bulk_transfer(struct vchiq_instance *instance, unsigned int handl
 	return status;
 }
 
-static enum vchiq_status
+static int
 add_completion(struct vchiq_instance *instance, enum vchiq_reason reason,
 	       struct vchiq_header *header, struct user_service *user_service,
 	       void *bulk_userdata)
@@ -1030,7 +1036,7 @@ add_completion(struct vchiq_instance *instance, enum vchiq_reason reason,
 	return 0;
 }
 
-enum vchiq_status
+int
 service_callback(struct vchiq_instance *instance, enum vchiq_reason reason,
 		 struct vchiq_header *header, unsigned int handle, void *bulk_userdata)
 {
@@ -1089,7 +1095,7 @@ service_callback(struct vchiq_instance *instance, enum vchiq_reason reason,
 			 */
 			if ((user_service->message_available_pos -
 				instance->completion_remove) < 0) {
-				enum vchiq_status status;
+				int status;
 
 				vchiq_log_info(vchiq_arm_log_level,
 					       "Inserting extra MESSAGE_AVAILABLE");
@@ -1300,7 +1306,7 @@ vchiq_get_state(void)
  * Autosuspend related functionality
  */
 
-static enum vchiq_status
+static int
 vchiq_keepalive_vchiq_callback(struct vchiq_instance *instance,
 			       enum vchiq_reason reason,
 			       struct vchiq_header *header,
@@ -1316,7 +1322,7 @@ vchiq_keepalive_thread_func(void *v)
 	struct vchiq_state *state = (struct vchiq_state *)v;
 	struct vchiq_arm_state *arm_state = vchiq_platform_get_arm_state(state);
 
-	enum vchiq_status status;
+	int status;
 	struct vchiq_instance *instance;
 	unsigned int ka_handle;
 	int ret;
@@ -1573,7 +1579,7 @@ vchiq_instance_set_trace(struct vchiq_instance *instance, int trace)
 	instance->trace = (trace != 0);
 }
 
-enum vchiq_status
+int
 vchiq_use_service(struct vchiq_instance *instance, unsigned int handle)
 {
 	int ret = -EINVAL;
@@ -1587,7 +1593,7 @@ vchiq_use_service(struct vchiq_instance *instance, unsigned int handle)
 }
 EXPORT_SYMBOL(vchiq_use_service);
 
-enum vchiq_status
+int
 vchiq_release_service(struct vchiq_instance *instance, unsigned int handle)
 {
 	int ret = -EINVAL;
@@ -1681,7 +1687,7 @@ vchiq_dump_service_use_state(struct vchiq_state *state)
 	kfree(service_data);
 }
 
-enum vchiq_status
+int
 vchiq_check_service(struct vchiq_service *service)
 {
 	struct vchiq_arm_state *arm_state;
@@ -1829,14 +1835,12 @@ error_exit:
 	return err;
 }
 
-static int vchiq_remove(struct platform_device *pdev)
+static void vchiq_remove(struct platform_device *pdev)
 {
 	platform_device_unregister(bcm2835_audio);
 	platform_device_unregister(bcm2835_camera);
 	vchiq_debugfs_deinit();
 	vchiq_deregister_chrdev();
-
-	return 0;
 }
 
 static struct platform_driver vchiq_driver = {
@@ -1845,7 +1849,7 @@ static struct platform_driver vchiq_driver = {
 		.of_match_table = vchiq_of_match,
 	},
 	.probe = vchiq_probe,
-	.remove = vchiq_remove,
+	.remove_new = vchiq_remove,
 };
 
 static int __init vchiq_driver_init(void)

@@ -21,50 +21,6 @@
 
 #define base_idx(X) ((X) & 0xffffff)
 
-static char nulldfa_src[] = {
-	#include "nulldfa.in"
-};
-struct aa_dfa *nulldfa;
-
-static char stacksplitdfa_src[] = {
-	#include "stacksplitdfa.in"
-};
-struct aa_dfa *stacksplitdfa;
-
-int aa_setup_dfa_engine(void)
-{
-	int error;
-
-	nulldfa = aa_dfa_unpack(nulldfa_src, sizeof(nulldfa_src),
-				TO_ACCEPT1_FLAG(YYTD_DATA32) |
-				TO_ACCEPT2_FLAG(YYTD_DATA32));
-	if (IS_ERR(nulldfa)) {
-		error = PTR_ERR(nulldfa);
-		nulldfa = NULL;
-		return error;
-	}
-
-	stacksplitdfa = aa_dfa_unpack(stacksplitdfa_src,
-				      sizeof(stacksplitdfa_src),
-				      TO_ACCEPT1_FLAG(YYTD_DATA32) |
-				      TO_ACCEPT2_FLAG(YYTD_DATA32));
-	if (IS_ERR(stacksplitdfa)) {
-		aa_put_dfa(nulldfa);
-		nulldfa = NULL;
-		error = PTR_ERR(stacksplitdfa);
-		stacksplitdfa = NULL;
-		return error;
-	}
-
-	return 0;
-}
-
-void aa_teardown_dfa_engine(void)
-{
-	aa_put_dfa(stacksplitdfa);
-	aa_put_dfa(nulldfa);
-}
-
 /**
  * unpack_table - unpack a dfa table (one of accept, default, base, next check)
  * @blob: data to unpack (NOT NULL)
@@ -452,17 +408,17 @@ do {							\
  *
  * Returns: final state reached after input is consumed
  */
-unsigned int aa_dfa_match_len(struct aa_dfa *dfa, unsigned int start,
-			      const char *str, int len)
+aa_state_t aa_dfa_match_len(struct aa_dfa *dfa, aa_state_t start,
+			    const char *str, int len)
 {
 	u16 *def = DEFAULT_TABLE(dfa);
 	u32 *base = BASE_TABLE(dfa);
 	u16 *next = NEXT_TABLE(dfa);
 	u16 *check = CHECK_TABLE(dfa);
-	unsigned int state = start;
+	aa_state_t state = start;
 
-	if (state == 0)
-		return 0;
+	if (state == DFA_NOMATCH)
+		return DFA_NOMATCH;
 
 	/* current state is <state>, matching character *str */
 	if (dfa->tables[YYTD_ID_EC]) {
@@ -497,17 +453,16 @@ unsigned int aa_dfa_match_len(struct aa_dfa *dfa, unsigned int start,
  *
  * Returns: final state reached after input is consumed
  */
-unsigned int aa_dfa_match(struct aa_dfa *dfa, unsigned int start,
-			  const char *str)
+aa_state_t aa_dfa_match(struct aa_dfa *dfa, aa_state_t start, const char *str)
 {
 	u16 *def = DEFAULT_TABLE(dfa);
 	u32 *base = BASE_TABLE(dfa);
 	u16 *next = NEXT_TABLE(dfa);
 	u16 *check = CHECK_TABLE(dfa);
-	unsigned int state = start;
+	aa_state_t state = start;
 
-	if (state == 0)
-		return 0;
+	if (state == DFA_NOMATCH)
+		return DFA_NOMATCH;
 
 	/* current state is <state>, matching character *str */
 	if (dfa->tables[YYTD_ID_EC]) {
@@ -541,8 +496,7 @@ unsigned int aa_dfa_match(struct aa_dfa *dfa, unsigned int start,
  *
  * Returns: state reach after input @c
  */
-unsigned int aa_dfa_next(struct aa_dfa *dfa, unsigned int state,
-			  const char c)
+aa_state_t aa_dfa_next(struct aa_dfa *dfa, aa_state_t state, const char c)
 {
 	u16 *def = DEFAULT_TABLE(dfa);
 	u32 *base = BASE_TABLE(dfa);
@@ -560,7 +514,7 @@ unsigned int aa_dfa_next(struct aa_dfa *dfa, unsigned int state,
 	return state;
 }
 
-unsigned int aa_dfa_outofband_transition(struct aa_dfa *dfa, unsigned int state)
+aa_state_t aa_dfa_outofband_transition(struct aa_dfa *dfa, aa_state_t state)
 {
 	u16 *def = DEFAULT_TABLE(dfa);
 	u32 *base = BASE_TABLE(dfa);
@@ -590,7 +544,7 @@ unsigned int aa_dfa_outofband_transition(struct aa_dfa *dfa, unsigned int state)
  *
  * Returns: final state reached after input is consumed
  */
-unsigned int aa_dfa_match_until(struct aa_dfa *dfa, unsigned int start,
+aa_state_t aa_dfa_match_until(struct aa_dfa *dfa, aa_state_t start,
 				const char *str, const char **retpos)
 {
 	u16 *def = DEFAULT_TABLE(dfa);
@@ -598,10 +552,10 @@ unsigned int aa_dfa_match_until(struct aa_dfa *dfa, unsigned int start,
 	u16 *next = NEXT_TABLE(dfa);
 	u16 *check = CHECK_TABLE(dfa);
 	u32 *accept = ACCEPT_TABLE(dfa);
-	unsigned int state = start, pos;
+	aa_state_t state = start, pos;
 
-	if (state == 0)
-		return 0;
+	if (state == DFA_NOMATCH)
+		return DFA_NOMATCH;
 
 	/* current state is <state>, matching character *str */
 	if (dfa->tables[YYTD_ID_EC]) {
@@ -651,7 +605,7 @@ unsigned int aa_dfa_match_until(struct aa_dfa *dfa, unsigned int start,
  *
  * Returns: final state reached after input is consumed
  */
-unsigned int aa_dfa_matchn_until(struct aa_dfa *dfa, unsigned int start,
+aa_state_t aa_dfa_matchn_until(struct aa_dfa *dfa, aa_state_t start,
 				 const char *str, int n, const char **retpos)
 {
 	u16 *def = DEFAULT_TABLE(dfa);
@@ -659,11 +613,11 @@ unsigned int aa_dfa_matchn_until(struct aa_dfa *dfa, unsigned int start,
 	u16 *next = NEXT_TABLE(dfa);
 	u16 *check = CHECK_TABLE(dfa);
 	u32 *accept = ACCEPT_TABLE(dfa);
-	unsigned int state = start, pos;
+	aa_state_t state = start, pos;
 
 	*retpos = NULL;
-	if (state == 0)
-		return 0;
+	if (state == DFA_NOMATCH)
+		return DFA_NOMATCH;
 
 	/* current state is <state>, matching character *str */
 	if (dfa->tables[YYTD_ID_EC]) {
@@ -696,38 +650,38 @@ unsigned int aa_dfa_matchn_until(struct aa_dfa *dfa, unsigned int start,
 	return state;
 }
 
-#define inc_wb_pos(wb)						\
-do {								\
+#define inc_wb_pos(wb)							\
+do {									\
 	BUILD_BUG_ON_NOT_POWER_OF_2(WB_HISTORY_SIZE);			\
 	wb->pos = (wb->pos + 1) & (WB_HISTORY_SIZE - 1);		\
-	wb->len = (wb->len + 1) & (WB_HISTORY_SIZE - 1);		\
+	wb->len = (wb->len + 1) > WB_HISTORY_SIZE ? WB_HISTORY_SIZE :	\
+				wb->len + 1;				\
 } while (0)
 
 /* For DFAs that don't support extended tagging of states */
-static bool is_loop(struct match_workbuf *wb, unsigned int state,
+/* adjust is only set if is_loop returns true */
+static bool is_loop(struct match_workbuf *wb, aa_state_t state,
 		    unsigned int *adjust)
 {
-	unsigned int pos = wb->pos;
-	unsigned int i;
+	int pos = wb->pos;
+	int i;
 
 	if (wb->history[pos] < state)
 		return false;
 
-	for (i = 0; i <= wb->len; i++) {
+	for (i = 0; i < wb->len; i++) {
 		if (wb->history[pos] == state) {
 			*adjust = i;
 			return true;
 		}
-		if (pos == 0)
-			pos = WB_HISTORY_SIZE;
-		pos--;
+		/* -1 wraps to WB_HISTORY_SIZE - 1 */
+		pos = (pos - 1) & (WB_HISTORY_SIZE - 1);
 	}
 
-	*adjust = i;
-	return true;
+	return false;
 }
 
-static unsigned int leftmatch_fb(struct aa_dfa *dfa, unsigned int start,
+static aa_state_t leftmatch_fb(struct aa_dfa *dfa, aa_state_t start,
 				 const char *str, struct match_workbuf *wb,
 				 unsigned int *count)
 {
@@ -735,7 +689,7 @@ static unsigned int leftmatch_fb(struct aa_dfa *dfa, unsigned int start,
 	u32 *base = BASE_TABLE(dfa);
 	u16 *next = NEXT_TABLE(dfa);
 	u16 *check = CHECK_TABLE(dfa);
-	unsigned int state = start, pos;
+	aa_state_t state = start, pos;
 
 	AA_BUG(!dfa);
 	AA_BUG(!str);
@@ -743,8 +697,8 @@ static unsigned int leftmatch_fb(struct aa_dfa *dfa, unsigned int start,
 	AA_BUG(!count);
 
 	*count = 0;
-	if (state == 0)
-		return 0;
+	if (state == DFA_NOMATCH)
+		return DFA_NOMATCH;
 
 	/* current state is <state>, matching character *str */
 	if (dfa->tables[YYTD_ID_EC]) {
@@ -808,8 +762,8 @@ out:
  *
  * Returns: final state reached after input is consumed
  */
-unsigned int aa_dfa_leftmatch(struct aa_dfa *dfa, unsigned int start,
-			      const char *str, unsigned int *count)
+aa_state_t aa_dfa_leftmatch(struct aa_dfa *dfa, aa_state_t start,
+			    const char *str, unsigned int *count)
 {
 	DEFINE_MATCH_WB(wb);
 

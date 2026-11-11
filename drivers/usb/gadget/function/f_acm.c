@@ -695,10 +695,8 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 	acm->notify_req = no_free_ptr(request);
 
 	dev_dbg(&cdev->gadget->dev,
-		"acm ttyGS%d: %s speed IN/%s OUT/%s NOTIFY/%s\n",
+		"acm ttyGS%d: IN/%s OUT/%s NOTIFY/%s\n",
 		acm->port_num,
-		gadget_is_superspeed(c->cdev->gadget) ? "super" :
-		gadget_is_dualspeed(c->cdev->gadget) ? "dual" : "full",
 		acm->port.in->name, acm->port.out->name,
 		acm->notify->name);
 	return 0;
