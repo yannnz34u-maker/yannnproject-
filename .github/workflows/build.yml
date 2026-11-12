@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # Checkout Kernel
+      # Checkout
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
@@ -44,44 +44,13 @@ jobs:
             bc bison build-essential flex \
             git curl wget zip unzip \
             libssl-dev libelf-dev \
-            python3 python3-pip python3-venv \
+            python3 python3-pip \
             clang llvm lld \
             pahole lz4 kmod \
             device-tree-compiler \
             rsync ccache patch
 
-      # Download Google Drive boot.img
-      - name: Download Original Boot Image
-        run: |
-          set -e
-
-          python3 -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install gdown
-
-          .venv/bin/gdown --fuzzy \
-            "https://drive.google.com/file/d/1fgrC78spMTEFeFdlHQdA-nLICwbrksGY/view?usp=drivesdk" \
-            -O base_boot.img
-
-          test -s base_boot.img
-
-          echo "===== ORIGINAL BOOT IMAGE ====="
-          ls -lh base_boot.img
-          sha256sum base_boot.img
-
-      # AOSP Boot Image Tools
-      - name: Download AOSP Boot Tools
-        run: |
-          set -e
-
-          git clone --depth=1 \
-            https://android.googlesource.com/platform/system/tools/mkbootimg \
-            boot-tools
-
-          test -s boot-tools/unpack_bootimg.py
-          test -s boot-tools/mkbootimg.py
-
-      # Clone AnyKernel3
+      # AnyKernel3
       - name: Clone AnyKernel3
         run: |
           git clone --depth=1 \
@@ -99,7 +68,7 @@ jobs:
           echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
 
-      # Configure Kernel
+      # Kernel Configuration
       - name: Configure GKI Defconfig
         run: |
           set -e
@@ -115,12 +84,23 @@ jobs:
             -d MODULE_SIG_FORCE \
             -e TCP_CONG_BBR \
             -e DEFAULT_BBR \
-            -e NET_SCH_FQ
+            -e NET_SCH_FQ \
+            -e ZRAM \
+            -e ZRAM_MULTI_COMP \
+            -e CRYPTO_LZ4 \
+            -e CRYPTO_LZO \
+            -e CRYPTO_ZSTD \
+            -e LZ4_COMPRESS \
+            -e LZ4_DECOMPRESS \
+            -e LZO_COMPRESS \
+            -e LZO_DECOMPRESS \
+            -e ZSTD_COMPRESS \
+            -e ZSTD_DECOMPRESS
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-          echo "===== NETWORK CONFIG ====="
-          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
+          echo "===== NETWORK AND COMPRESSION CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|ZRAM|ZRAM_MULTI_COMP|CRYPTO_LZ4|CRYPTO_LZO|CRYPTO_ZSTD|LZ4_COMPRESS|LZ4_DECOMPRESS|LZO_COMPRESS|LZO_DECOMPRESS|ZSTD_COMPRESS|ZSTD_DECOMPRESS)=' out/.config || true
 
       # BBRv3
       - name: Try BBRv3 With Automatic BBR Fallback
@@ -183,10 +163,10 @@ jobs:
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-          echo "===== FINAL NETWORK CONFIG ====="
-          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
+          echo "===== FINAL NETWORK AND COMPRESSION CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|ZRAM|ZRAM_MULTI_COMP|CRYPTO_LZ4|CRYPTO_LZO|CRYPTO_ZSTD|LZ4_COMPRESS|LZ4_DECOMPRESS|LZO_COMPRESS|LZO_DECOMPRESS|ZSTD_COMPRESS|ZSTD_DECOMPRESS)=' out/.config || true
 
-      # Compile Kernel
+      # Compile
       - name: Compile GKI Kernel
         run: |
           set -e
@@ -199,134 +179,25 @@ jobs:
             LLVM_IAS=1 \
             Image
 
-          test -s out/arch/arm64/boot/Image
-
           echo "===== BUILD SUCCESS ====="
           echo "BBR: $BBR_VARIANT"
-          ls -lh out/arch/arm64/boot/Image
 
-      # Prepare Release
-      - name: Prepare Release Directory
-        run: |
-          mkdir -p release
-
-      # Inspect Original Boot Image
-      - name: Inspect Original Boot Image
+      # Verify Image
+      - name: Verify Kernel Image Output
         run: |
           set -e
 
-          python3 boot-tools/unpack_bootimg.py \
-            --boot_img base_boot.img \
-            --out boot_unpacked \
-            --format info | tee boot_info.txt
+          test -s kernel/out/arch/arm64/boot/Image
 
-          python3 - <<'PY'
-          import re
-          import sys
-
-          info = open("boot_info.txt").read()
-
-          if "boot magic: ANDROID!" not in info:
-              sys.exit("ERROR: File is not a standard Android boot.img")
-
-          header = re.search(
-              r"boot image header version:\s*(\d+)", info
-          )
-
-          if not header:
-              sys.exit("ERROR: Cannot identify boot header version")
-
-          version = int(header.group(1))
-
-          if version > 4:
-              sys.exit(f"Unsupported boot header version: {version}")
-
-          if version >= 4:
-              signature = re.search(
-                  r"boot.img signature size:\s*(\d+)", info
-              )
-
-              if not signature:
-                  sys.exit("ERROR: Cannot inspect boot signature")
-
-              if int(signature.group(1)) != 0:
-                  sys.exit(
-                      "ERROR: Boot image has a non-empty v4 signature. "
-                      "Repacking is stopped to avoid silently dropping it."
-                  )
-
-          print(f"Boot header version: {version}")
-          print("Boot image format accepted for repack.")
-          PY
-
-      # Repack Boot Image
-      - name: Repack Specter Boot Image
-        run: |
-          set -e
-
-          echo "===== GENERATING MKBOOTIMG ARGUMENTS ====="
-
-          python3 boot-tools/unpack_bootimg.py \
-            --boot_img base_boot.img \
-            --out boot_unpacked \
-            --format mkbootimg \
-            -0 > mkbootimg_args.bin
-
-          mapfile -d '' -t MKBOOTIMG_ARGS < mkbootimg_args.bin
-
-          # Replace only the kernel component
-          KERNEL_IMAGE="$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image"
-          FOUND_KERNEL=false
-
-          for ((i=0; i<${#MKBOOTIMG_ARGS[@]}; i++)); do
-            if [ "${MKBOOTIMG_ARGS[$i]}" = "--kernel" ]; then
-              MKBOOTIMG_ARGS[$((i+1))]="$KERNEL_IMAGE"
-              FOUND_KERNEL=true
-              break
-            fi
-          done
-
-          if [ "$FOUND_KERNEL" != "true" ]; then
-            echo "::error::Kernel argument not found"
-            exit 1
-          fi
-
-          python3 boot-tools/mkbootimg.py \
-            "${MKBOOTIMG_ARGS[@]}" \
-            --output release/Specter-Malachite-boot.img
-
-          test -s release/Specter-Malachite-boot.img
-
-          echo "===== REPACK COMPLETE ====="
-          ls -lh release/Specter-Malachite-boot.img
-
-      # Verify Repacked Image
-      - name: Verify Repacked Boot Image
-        run: |
-          set -e
-
-          python3 boot-tools/unpack_bootimg.py \
-            --boot_img release/Specter-Malachite-boot.img \
-            --out boot_verify \
-            --format info | tee repacked_info.txt
-
-          # Verify kernel was inserted
-          cmp \
-            kernel/out/arch/arm64/boot/Image \
-            boot_verify/kernel
-
-          # Verify original ramdisk was preserved
-          cmp \
-            boot_unpacked/ramdisk \
-            boot_verify/ramdisk
-
-          echo "===== BOOT IMAGE VERIFIED ====="
-          sha256sum release/Specter-Malachite-boot.img
+          echo "===== KERNEL OUTPUT ====="
+          ls -lh kernel/out/arch/arm64/boot/Image
 
       # Prepare AnyKernel3
       - name: Prepare AnyKernel3
         run: |
           set -e
+
+          mkdir -p release
 
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
@@ -373,7 +244,7 @@ jobs:
           ui_print " "
           AK3EOF
 
-      # Package AnyKernel3
+      # Package ZIP
       - name: Pack AnyKernel3 ZIP
         run: |
           set -e
@@ -387,6 +258,8 @@ jobs:
       # Build Information
       - name: Generate Build Information
         run: |
+          mkdir -p release
+
           cat > release/BUILD_INFO.txt <<EOF
           Project: Specter-Malachite
           Device: Xiaomi Malachite / POCO X7
@@ -395,21 +268,10 @@ jobs:
           Architecture: ARM64
           BBR: $BBR_VARIANT
           Localversion: -Specter-Malachite
-          Base Image: Google Drive boot.img
-          Repack: AOSP mkbootimg
-          Output: Specter-Malachite-boot.img
           Package: AnyKernel3
           EOF
 
-      # Upload Boot Image
-      - name: Upload Repacked Boot Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: Specter-Malachite-Repacked-Boot-Image
-          path: release/Specter-Malachite-boot.img
-          retention-days: 14
-
-      # Upload Kernel ZIP
+      # Upload Kernel
       - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -417,7 +279,7 @@ jobs:
           path: release/Specter-Malachite-GKI-6.1.174.zip
           retention-days: 14
 
-      # Upload Build Information
+      # Upload Build Info
       - name: Upload Build Information
         uses: actions/upload-artifact@v4
         with:
