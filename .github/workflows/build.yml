@@ -9,6 +9,26 @@ on:
         type: boolean
         default: true
 
+      little_cpus:
+        description: "Verified LITTLE CPU mask (example: 0 1 2 3)"
+        type: string
+        default: ""
+
+      big_cpus:
+        description: "Verified BIG CPU mask (example: 4 5 6 7)"
+        type: string
+        default: ""
+
+      little_max_freq:
+        description: "LITTLE maximum frequency in kHz (0 = disabled)"
+        type: string
+        default: "0"
+
+      big_max_freq:
+        description: "BIG maximum frequency in kHz (0 = disabled)"
+        type: string
+        default: "0"
+
 permissions:
   contents: read
 
@@ -62,8 +82,15 @@ jobs:
           set -e
           cd kernel
 
+          VERSION=$(make -s kernelversion)
+
           echo "===== KERNEL VERSION ====="
-          make -s kernelversion
+          echo "$VERSION"
+
+          if [ "$VERSION" != "6.1.174" ]; then
+            echo "::error::Expected kernel 6.1.174, found $VERSION"
+            exit 1
+          fi
 
           echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
@@ -84,23 +111,12 @@ jobs:
             -d MODULE_SIG_FORCE \
             -e TCP_CONG_BBR \
             -e DEFAULT_BBR \
-            -e NET_SCH_FQ \
-            -e ZRAM \
-            -e ZRAM_MULTI_COMP \
-            -e CRYPTO_LZ4 \
-            -e CRYPTO_LZO \
-            -e CRYPTO_ZSTD \
-            -e LZ4_COMPRESS \
-            -e LZ4_DECOMPRESS \
-            -e LZO_COMPRESS \
-            -e LZO_DECOMPRESS \
-            -e ZSTD_COMPRESS \
-            -e ZSTD_DECOMPRESS
+            -e NET_SCH_FQ
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-          echo "===== NETWORK AND COMPRESSION CONFIG ====="
-          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|ZRAM|ZRAM_MULTI_COMP|CRYPTO_LZ4|CRYPTO_LZO|CRYPTO_ZSTD|LZ4_COMPRESS|LZ4_DECOMPRESS|LZO_COMPRESS|LZO_DECOMPRESS|ZSTD_COMPRESS|ZSTD_DECOMPRESS)=' out/.config || true
+          echo "===== NETWORK CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
 
       # BBRv3
       - name: Try BBRv3 With Automatic BBR Fallback
@@ -163,8 +179,8 @@ jobs:
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-          echo "===== FINAL NETWORK AND COMPRESSION CONFIG ====="
-          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|ZRAM|ZRAM_MULTI_COMP|CRYPTO_LZ4|CRYPTO_LZO|CRYPTO_ZSTD|LZ4_COMPRESS|LZ4_DECOMPRESS|LZO_COMPRESS|LZO_DECOMPRESS|ZSTD_COMPRESS|ZSTD_DECOMPRESS)=' out/.config || true
+          echo "===== FINAL NETWORK CONFIG ====="
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=' out/.config || true
 
       # Compile
       - name: Compile GKI Kernel
@@ -194,6 +210,11 @@ jobs:
 
       # Prepare AnyKernel3
       - name: Prepare AnyKernel3
+        env:
+          LITTLE_CPUS: ${{ inputs.little_cpus }}
+          BIG_CPUS: ${{ inputs.big_cpus }}
+          LITTLE_MAX: ${{ inputs.little_max_freq }}
+          BIG_MAX: ${{ inputs.big_max_freq }}
         run: |
           set -e
 
@@ -201,6 +222,33 @@ jobs:
 
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
+          # Validate frequency inputs
+          for FREQ in "$LITTLE_MAX" "$BIG_MAX"; do
+            if ! [[ "$FREQ" =~ ^[0-9]+$ ]]; then
+              echo "::error::CPU frequency must be numeric in kHz"
+              exit 1
+            fi
+          done
+
+          # Validate CPU masks
+          for MASK in "$LITTLE_CPUS" "$BIG_CPUS"; do
+            if [ -n "$MASK" ] && ! [[ "$MASK" =~ ^[0-9\ ,]+$ ]]; then
+              echo "::error::Invalid CPU mask"
+              exit 1
+            fi
+          done
+
+          if [ "$LITTLE_MAX" -gt 0 ] && [ -z "$LITTLE_CPUS" ]; then
+            echo "::error::LITTLE CPU mask is required"
+            exit 1
+          fi
+
+          if [ "$BIG_MAX" -gt 0 ] && [ -z "$BIG_CPUS" ]; then
+            echo "::error::BIG CPU mask is required"
+            exit 1
+          fi
+
+          # AnyKernel3 installer
           cat > AnyKernel3/anykernel.sh <<'AK3EOF'
           properties() {
             kernel.string=Specter-Malachite-GKI-6.1.174
@@ -244,6 +292,118 @@ jobs:
           ui_print " "
           AK3EOF
 
+          # Custom CPU configuration
+          cat > AnyKernel3/cpu-underclock.conf <<EOF
+          LITTLE_CPUS='$LITTLE_CPUS'
+          BIG_CPUS='$BIG_CPUS'
+          LITTLE_MAX='$LITTLE_MAX'
+          BIG_MAX='$BIG_MAX'
+          EOF
+
+          # Boot service
+          cat > AnyKernel3/service.sh <<'SERVICEEOF'
+          #!/system/bin/sh
+
+          MODDIR=${0%/*}
+          CONFIG="$MODDIR/cpu-underclock.conf"
+          LOG="/data/local/tmp/specter-underclock.log"
+
+          [ -f "$CONFIG" ] || exit 0
+
+          . "$CONFIG"
+
+          log() {
+              echo "[Specter CPU] $*" >> "$LOG"
+          }
+
+          normalize() {
+              echo "$1" | tr ' ' '\n' | sed '/^$/d' | sort -n | tr '\n' ' ' | sed 's/ $//'
+          }
+
+          valid_number() {
+              case "$1" in
+                  ''|*[!0-9]*) return 1 ;;
+                  *) return 0 ;;
+              esac
+          }
+
+          apply_limit() {
+              POLICY="$1"
+              TARGET="$2"
+
+              valid_number "$TARGET" || return 0
+              [ "$TARGET" -gt 0 ] || return 0
+
+              MAX_FILE="$POLICY/cpuinfo_max_freq"
+              SCALE_FILE="$POLICY/scaling_max_freq"
+              AVAILABLE="$POLICY/scaling_available_frequencies"
+
+              [ -r "$MAX_FILE" ] || return 0
+              [ -w "$SCALE_FILE" ] || return 0
+              [ -r "$AVAILABLE" ] || {
+                  log "Skipped $POLICY: available frequencies unavailable"
+                  return 0
+              }
+
+              HARDWARE_MAX=$(cat "$MAX_FILE")
+
+              if [ "$TARGET" -ge "$HARDWARE_MAX" ]; then
+                  log "Skipped $POLICY: target is not below hardware maximum"
+                  return 0
+              fi
+
+              if ! grep -qw "$TARGET" "$AVAILABLE"; then
+                  log "Skipped $POLICY: frequency not supported"
+                  return 0
+              fi
+
+              if echo "$TARGET" > "$SCALE_FILE"; then
+                  log "Applied $POLICY maximum: $TARGET kHz"
+              else
+                  log "Failed to apply $POLICY"
+              fi
+          }
+
+          # Wait for CPUFreq policies to become available.
+          COUNT=0
+          while [ "$COUNT" -lt 60 ]; do
+              [ -d /sys/devices/system/cpu/cpufreq ] && \
+              [ -n "$(ls -d /sys/devices/system/cpu/cpufreq/policy* 2>/dev/null)" ] && break
+
+              sleep 1
+              COUNT=$((COUNT + 1))
+          done
+
+          LITTLE_MASK=$(normalize "$LITTLE_CPUS")
+          BIG_MASK=$(normalize "$BIG_CPUS")
+
+          if [ -n "$LITTLE_MASK" ] && [ "$LITTLE_MASK" = "$BIG_MASK" ]; then
+              log "Invalid configuration: LITTLE and BIG masks are identical"
+              exit 0
+          fi
+
+          for POLICY in /sys/devices/system/cpu/cpufreq/policy*; do
+              [ -d "$POLICY" ] || continue
+
+              RELATED=$(normalize "$(cat "$POLICY/related_cpus" 2>/dev/null)")
+
+              [ -n "$RELATED" ] || continue
+
+              if [ -n "$LITTLE_MASK" ] && [ "$RELATED" = "$LITTLE_MASK" ]; then
+                  apply_limit "$POLICY" "$LITTLE_MAX"
+              fi
+
+              if [ -n "$BIG_MASK" ] && [ "$RELATED" = "$BIG_MASK" ]; then
+                  apply_limit "$POLICY" "$BIG_MAX"
+              fi
+          done
+
+          log "CPU underclock service completed"
+          exit 0
+          SERVICEEOF
+
+          chmod 0755 AnyKernel3/service.sh
+
       # Package ZIP
       - name: Pack AnyKernel3 ZIP
         run: |
@@ -267,6 +427,10 @@ jobs:
           Compiler: Ubuntu LLVM/Clang
           Architecture: ARM64
           BBR: $BBR_VARIANT
+          Little CPU mask: ${{ inputs.little_cpus }}
+          Big CPU mask: ${{ inputs.big_cpus }}
+          Little max frequency: ${{ inputs.little_max_freq }} kHz
+          Big max frequency: ${{ inputs.big_max_freq }} kHz
           Localversion: -Specter-Malachite
           Package: AnyKernel3
           EOF
